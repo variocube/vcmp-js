@@ -1,0 +1,44 @@
+{
+  "name": "@variocube/messaging",
+  "version": "1.0.0-alpha1",
+  "description": "Variocube Messaging Protocol",
+  "main": "cjs/index.js",
+  "module": "esm/index.js",
+  "types": "esm/index.d.ts",
+  "browser": {
+    "./esm/random.js": "./esm/random-browser.js"
+  },
+  "scripts": {
+    "build": "tsc && tsc -m esnext --outDir ./esm -d",
+    "test": "mocha -r ts-node/register --colors tests/**/*.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/variocube/vcmp-js.git"
+  },
+  "author": "Variocube",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/variocube/vcmp-js/issues"
+  },
+  "homepage": "https://github.com/variocube/vcmp-js#readme",
+  "devDependencies": {
+    "@types/chai": "^4.2.4",
+    "@types/mocha": "^5.2.7",
+    "@types/node": "^12.12.6",
+    "@types/ws": "^6.0.3",
+    "chai": "^4.2.0",
+    "mocha": "^6.2.2",
+    "ts-node": "^8.4.1",
+    "typescript": "^3.6.4",
+    "ws": "^7.2.0"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com/"
+  },
+  "files": [
+    "cjs/**/*",
+    "esm/**/*",
+    "src/**/*"
+  ]
+}

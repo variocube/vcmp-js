@@ -1,0 +1,223 @@
+import {generateVcmpFrameId, parseVcmpFrame, serializeVcmpFrame, VcmpFrame, VcmpFrameType} from "./frame";
+
+export interface Options {
+    reconnectTimeout: number;
+    autoStart: boolean;
+    customWebSocket?: typeof WebSocket;
+    debug: boolean;
+}
+
+const defaultOptions: Options = {
+    reconnectTimeout: 10000,
+    autoStart: false,
+    debug: false
+};
+
+type PromiseCallbacks = {
+    resolve: () => void;
+    reject: (reason?: any) => void;
+}
+
+export type VcmpHandler<T> = (message: T) => Promise<void> | void;
+export type OpenHandler = () => any;
+export type CloseHandler = () => any;
+
+export interface VcmpMessage {
+    "@type": string;
+}
+
+export class VcmpClient {
+
+    private readonly url: string;
+    private readonly options: Options;
+
+    private running = false;
+    private waitingForReconnect = false;
+    private webSocket?: WebSocket;
+
+    private callbacks = new Map<string, PromiseCallbacks>();
+    private handler = new Map<string, VcmpHandler<any>>();
+
+    public onOpen?: OpenHandler;
+    public onClose?: CloseHandler;
+
+    constructor(url: string, options?: Partial<Options>) {
+
+        this.url = url;
+
+        this.options = {
+            ...defaultOptions,
+            ...options,
+        };
+
+        this.debug(`Constructed VcmpClient for URL: ${this.url} and the following options`, this.options);
+
+        if (this.options.autoStart) {
+            this.debug(`Autostarting VcmpClient for URL: ${this.url}`);
+            this.start();
+        }
+    }
+
+    start() {
+        this.debug(`Starting VcmpClient for URL: ${this.url}`);
+        this.running = true;
+        this.initiateConnection();
+    }
+
+    stop() {
+        this.debug(`Stopping VcmpClient for URL: ${this.url}`);
+        this.running = false;
+        if (this.webSocket) {
+            this.debug(`VcmpClient, websocket open, closing`);
+            this.webSocket.close();
+        }
+    }
+
+    get connected() {
+        return !!this.webSocket;
+    }
+
+    send<T extends VcmpMessage>(message: T) {
+        this.debug(`Sending VcmpMessage`, message);
+        return new Promise((resolve, reject) => {
+            const payload = JSON.stringify(message);
+            const id = generateVcmpFrameId();
+            this.callbacks.set(id, {resolve, reject});
+            this.sendFrame({type: VcmpFrameType.MSG, id, payload});
+        });
+    }
+
+    private initiateConnection = () => {
+        this.debug('Initiating connection');
+        if (this.running) {
+            this.debug('Initiating connection');
+            const webSocketConstructor = this.options.customWebSocket || WebSocket;
+            if (typeof webSocketConstructor !== "function") {
+                throw new Error('WebSocket constructor not found. If running on Node, please install the `ws` package and pass it as customWebSocket in options.');
+            }
+
+            this.debug('Constructing websocket');
+            const webSocket = new webSocketConstructor(this.url);
+            this.debug('Connecting handlers');
+            webSocket.onmessage = this.handleMessage;
+            webSocket.onopen = this.handleOpen;
+            webSocket.onerror = this.handleError;
+            webSocket.onclose = this.handleClose;
+            this.debug('Setting websocket and signalling connected state');
+            this.webSocket = webSocket;
+        }else{
+            this.debug('Already running, ignoring call to initiateConnection');
+        }
+    };
+
+    on<T>(type: string, handler: VcmpHandler<T>) {
+        this.handler.set(type, handler);
+    }
+
+    off(type: string) {
+        this.handler.delete(type);
+    }
+
+    private scheduleReconnect() {
+        this.debug('Schedule reconnect');
+        this.webSocket = undefined;
+        if (this.running && !this.waitingForReconnect) {
+            this.debug('running == true && waitingForReconnect == false > reconnecting');
+            this.waitingForReconnect = true;
+            setTimeout(() => {
+                this.waitingForReconnect = false;
+                this.initiateConnection();
+            }, this.options.reconnectTimeout);
+        }
+    }
+
+    private handleOpen = () => {
+        console.info("WebSocket session open");
+        this.debug("WebSocket session open");
+        this.onOpen && this.onOpen();
+    };
+
+    private handleClose = (event: CloseEvent) => {
+        console.error("WebSocket session closed", event.reason);
+        this.onClose && this.onClose();
+        this.scheduleReconnect();
+    };
+
+    private handleError = () => {
+        console.error("WebSocket session error");
+        if (this.webSocket) {
+            this.webSocket.close();
+        }
+    };
+
+    private handleMessage = (event: MessageEvent) => {
+        if (typeof event.data == "string") {
+            const frame = parseVcmpFrame(event.data);
+            switch (frame.type) {
+                case VcmpFrameType.HBT:
+                    setTimeout(() => this.sendFrame(frame), frame.heartbeatInterval);
+                    break;
+
+                case VcmpFrameType.ACK:
+                    this.handleAck(frame.id);
+                    break;
+
+                case VcmpFrameType.NAK:
+                    this.handleNak(frame.id);
+                    break;
+
+                case VcmpFrameType.MSG:
+                    this.handleVcmpMessage(frame.id, frame.payload);
+                    break;
+            }
+        }
+    };
+
+    private handleVcmpMessage(frameId: string, payload: string) {
+        const message = JSON.parse(payload);
+        const type = message["@type"];
+        if (type) {
+            const handler = this.handler.get(type);
+            if (handler) {
+                Promise.resolve(handler(message))
+                    .then(() => {
+                        this.sendFrame({type: VcmpFrameType.ACK, id: frameId})
+                    })
+                    .catch((error) => {
+                        console.warn("Error in handler, sending NAK", error);
+                        this.sendFrame({type: VcmpFrameType.NAK, id: frameId});
+                    });
+            }
+        }
+        else {
+            console.error("Could not determine type of message", message);
+        }
+    }
+
+    private handleAck(frameId: string) {
+        const promise = this.callbacks.get(frameId);
+        if (promise) {
+            promise.resolve();
+        }
+    }
+
+    private handleNak(frameId: string) {
+        const promise = this.callbacks.get(frameId);
+        if (promise) {
+            promise.reject("NAK");
+        }
+    }
+
+    private sendFrame(frame: VcmpFrame) {
+        if (this.webSocket) {
+            this.webSocket.send(serializeVcmpFrame(frame));
+        }
+    }
+
+    private debug(message?: any, ...optionalParams: any[]) {
+        if(this.options.debug) {
+            console.log(message, optionalParams);
+        }
+    }
+}
+
