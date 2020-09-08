@@ -188,7 +188,7 @@ export class VcmpClient {
         if (type) {
             const handler = this.handler.get(type);
             if (handler) {
-                queueMicrotask(async () => {
+                asyncExecute(async () => {
                     try {
                         await handler(message);
                         this.sendFrame({type: VcmpFrameType.ACK, id: frameId});
@@ -245,4 +245,18 @@ export class VcmpClient {
         this.options.debug?.error(...data);
     }
 }
+
+function detectAsyncExecute() {
+    if (typeof queueMicrotask == "function") {
+        return queueMicrotask;
+    }
+    else if (typeof setImmediate == "function") {
+        return setImmediate;
+    }
+    else {
+        return (callback: VoidFunction) => Promise.resolve().then(callback);
+    }
+}
+
+const asyncExecute = detectAsyncExecute();
 
