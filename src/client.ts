@@ -41,6 +41,7 @@ export class VcmpClient {
     private readonly options: Options;
 
     private running = false;
+    private isConnected = false;
     private waitingForReconnect = false;
     private webSocket?: WebSocket;
 
@@ -83,7 +84,7 @@ export class VcmpClient {
     }
 
     get connected() {
-        return !!this.webSocket;
+        return this.isConnected;
     }
 
     send<T extends VcmpMessage>(message: T) {
@@ -112,7 +113,6 @@ export class VcmpClient {
             webSocket.onopen = this.handleOpen;
             webSocket.onerror = this.handleError;
             webSocket.onclose = this.handleClose;
-            this.debug("Setting websocket and signalling connected state");
             this.webSocket = webSocket;
         }
         else {
@@ -143,11 +143,13 @@ export class VcmpClient {
 
     private handleOpen = () => {
         this.info("WebSocket session open");
+        this.isConnected = true;
         this.onOpen && this.onOpen();
     };
 
     private handleClose = (event: CloseEvent) => {
         this.info("WebSocket session closed", event);
+        this.isConnected = false;
         this.onClose && this.onClose();
         this.scheduleReconnect();
     };
