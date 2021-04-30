@@ -1,4 +1,4 @@
-import {getRandomBytes} from "./random";
+import {getRandomBytesBase64} from "./random";
 
 const ID_LENGTH = 12;
 const ID_INDEX = 3;
@@ -78,7 +78,7 @@ export function serializeVcmpFrame(frame: VcmpFrame) {
 }
 
 export function generateVcmpFrameId() {
-    return escape(getRandomBytes(9).toString('base64'));
+    return escape(getRandomBytesBase64(9));
 }
 
 function escape(str: string) {

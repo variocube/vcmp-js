@@ -2,8 +2,8 @@ import * as crypto from "crypto";
 
 /**
  * Get random bytes (node version).
- * @param length
+ * @param byteCount
  */
-export function getRandomBytes(length: number) {
-    return crypto.randomBytes(length);
+export function getRandomBytesBase64(byteCount: number) {
+    return crypto.randomBytes(byteCount).toString("base64");
 }
