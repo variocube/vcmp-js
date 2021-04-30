@@ -45,6 +45,9 @@ export class VcmpClient {
     private waitingForReconnect = false;
     private webSocket?: WebSocket;
 
+    private heartbeatTimeout?: number | NodeJS.Timeout;
+    private reconnectTimeout?: number | NodeJS.Timeout;
+
     private callbacks = new Map<string, PromiseCallbacks>();
     private handler = new Map<string, VcmpHandler<any>>();
 
@@ -77,6 +80,9 @@ export class VcmpClient {
     stop() {
         this.debug(`Stopping VcmpClient for URL: ${this.url}`);
         this.running = false;
+        if (this.reconnectTimeout) {
+            clearTimeout(this.reconnectTimeout as any);
+        }
         if (this.webSocket) {
             this.debug(`VcmpClient, websocket open, closing`);
             this.webSocket.close();
@@ -134,7 +140,7 @@ export class VcmpClient {
         if (this.running && !this.waitingForReconnect) {
             this.debug("Scheduling reconnect.");
             this.waitingForReconnect = true;
-            setTimeout(() => {
+            this.reconnectTimeout = setTimeout(() => {
                 this.waitingForReconnect = false;
                 this.initiateConnection();
             }, this.options.reconnectTimeout);
@@ -150,6 +156,9 @@ export class VcmpClient {
     private handleClose = (event: CloseEvent) => {
         this.info("WebSocket session closed", event);
         this.isConnected = false;
+        if (this.heartbeatTimeout) {
+            clearTimeout(this.heartbeatTimeout as any);
+        }
         this.onClose && this.onClose();
         this.scheduleReconnect();
     };
@@ -166,7 +175,7 @@ export class VcmpClient {
             const frame = parseVcmpFrame(event.data);
             switch (frame.type) {
                 case VcmpFrameType.HBT:
-                    setTimeout(() => this.sendFrame(frame), frame.heartbeatInterval);
+                    this.heartbeatTimeout = setTimeout(() => this.sendFrame(frame), frame.heartbeatInterval);
                     break;
 
                 case VcmpFrameType.ACK:
