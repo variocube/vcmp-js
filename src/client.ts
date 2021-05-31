@@ -95,7 +95,7 @@ export class VcmpClient {
 
     send<T extends VcmpMessage>(message: T) {
         this.debug("Sending VcmpMessage", message);
-        return new Promise((resolve, reject) => {
+        return new Promise<void>((resolve, reject) => {
             const payload = JSON.stringify(message);
             const id = generateVcmpFrameId();
             this.callbacks.set(id, {resolve, reject});
