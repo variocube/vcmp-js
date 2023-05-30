@@ -1,9 +1,11 @@
-import {generateVcmpFrameId, parseVcmpFrame, serializeVcmpFrame, VcmpFrame, VcmpFrameType} from "./frame";
+import {CloseHandler, ConsoleLike, OpenHandler, VcmpHandler, VcmpMessage} from "./types";
+import {VcmpSession} from "./session";
+import * as NodeWebSocket from "ws";
 
 export interface Options {
     reconnectTimeout: number;
     autoStart: boolean;
-    customWebSocket?: typeof WebSocket;
+    customWebSocket?: (typeof NodeWebSocket) | (typeof WebSocket);
     debug?: ConsoleLike;
 }
 
@@ -12,43 +14,17 @@ const defaultOptions: Options = {
     autoStart: false,
 };
 
-type PromiseCallbacks = {
-    resolve: () => void;
-    reject: (reason?: any) => void;
-}
-
-export type VcmpHandler<T> = (message: T) => Promise<void> | void;
-export type OpenHandler = () => any;
-export type CloseHandler = () => any;
-
-export interface VcmpMessage {
-    "@type": string;
-}
-
-export interface ConsoleLike {
-    info(...data: any[]): void;
-
-    debug(...data: any[]): void;
-
-    warn(...data: any[]): void;
-
-    error(...data: any[]): void;
-}
-
 export class VcmpClient {
 
     private readonly url: string;
     private readonly options: Options;
 
     private running = false;
-    private isConnected = false;
     private waitingForReconnect = false;
-    private webSocket?: WebSocket;
+    private session?: VcmpSession;
 
-    private heartbeatTimeout?: number | NodeJS.Timeout;
     private reconnectTimeout?: number | NodeJS.Timeout;
 
-    private callbacks = new Map<string, PromiseCallbacks>();
     private handler = new Map<string, VcmpHandler<any>>();
 
     public onOpen?: OpenHandler;
@@ -83,24 +59,24 @@ export class VcmpClient {
         if (this.reconnectTimeout) {
             clearTimeout(this.reconnectTimeout as any);
         }
-        if (this.webSocket) {
+        if (this.session) {
             this.debug(`VcmpClient, websocket open, closing`);
-            this.webSocket.close();
+            this.session.close();
         }
     }
 
     get connected() {
-        return this.isConnected;
+        return this.session?.isOpen;
     }
 
     send<T extends VcmpMessage>(message: T) {
         this.debug("Sending VcmpMessage", message);
-        return new Promise<void>((resolve, reject) => {
-            const payload = JSON.stringify(message);
-            const id = generateVcmpFrameId();
-            this.callbacks.set(id, {resolve, reject});
-            this.sendFrame({type: VcmpFrameType.MSG, id, payload});
-        });
+        if (this.session) {
+            return this.session.send(message);
+        }
+        else {
+            return Promise.reject(new Error("No session."));
+        }
     }
 
     private initiateConnection = () => {
@@ -115,11 +91,13 @@ export class VcmpClient {
             this.debug("Constructing websocket");
             const webSocket = new webSocketConstructor(this.url);
             this.debug("Connecting handlers");
-            webSocket.onmessage = this.handleMessage;
-            webSocket.onopen = this.handleOpen;
-            webSocket.onerror = this.handleError;
-            webSocket.onclose = this.handleClose;
-            this.webSocket = webSocket;
+            this.session = new VcmpSession({
+                webSocket,
+                resolver: type => this.handler.get(type),
+                debug: this.options.debug
+            });
+            this.session.onOpen = this.handleOpen;
+            this.session.onClose = this.handleClose;
         }
         else {
             this.debug("Already running, ignoring call to initiateConnection");
@@ -136,7 +114,7 @@ export class VcmpClient {
 
     private scheduleReconnect() {
         this.debug("Checking whether to schedule reconnect.");
-        this.webSocket = undefined;
+        this.session = undefined;
         if (this.running && !this.waitingForReconnect) {
             this.debug("Scheduling reconnect.");
             this.waitingForReconnect = true;
@@ -149,96 +127,14 @@ export class VcmpClient {
 
     private handleOpen = () => {
         this.info("WebSocket session open");
-        this.isConnected = true;
         this.onOpen && this.onOpen();
     };
 
-    private handleClose = (event: CloseEvent) => {
-        this.info("WebSocket session closed", event);
-        this.isConnected = false;
-        if (this.heartbeatTimeout) {
-            clearTimeout(this.heartbeatTimeout as any);
-        }
+    private handleClose = () => {
+        this.info("WebSocket session closed");
         this.onClose && this.onClose();
         this.scheduleReconnect();
     };
-
-    private handleError = () => {
-        this.warn("WebSocket session error");
-        if (this.webSocket) {
-            this.webSocket.close();
-        }
-    };
-
-    private handleMessage = (event: MessageEvent) => {
-        if (typeof event.data == "string") {
-            const frame = parseVcmpFrame(event.data);
-            switch (frame.type) {
-                case VcmpFrameType.HBT:
-                    this.heartbeatTimeout = setTimeout(() => this.sendFrame(frame), frame.heartbeatInterval);
-                    break;
-
-                case VcmpFrameType.ACK:
-                    this.handleAck(frame.id);
-                    break;
-
-                case VcmpFrameType.NAK:
-                    this.handleNak(frame.id);
-                    break;
-
-                case VcmpFrameType.MSG:
-                    this.handleVcmpMessage(frame.id, frame.payload);
-                    break;
-            }
-        }
-    };
-
-    private handleVcmpMessage(frameId: string, payload: string) {
-        const message = JSON.parse(payload);
-        const type = message["@type"];
-        if (type) {
-            const handler = this.handler.get(type);
-            if (handler) {
-                asyncExecute(async () => {
-                    try {
-                        await handler(message);
-                        this.sendFrame({type: VcmpFrameType.ACK, id: frameId});
-                    }
-                    catch (error) {
-                        this.warn("Error in handler, sending NAK", error);
-                        this.sendFrame({type: VcmpFrameType.NAK, id: frameId});
-                    }
-                });
-            }
-            else {
-                this.warn("No handler found for message, sending NAK", message);
-                this.sendFrame({type: VcmpFrameType.NAK, id: frameId});
-            }
-        }
-        else {
-            this.error("Could not determine type of message", message);
-        }
-    }
-
-    private handleAck(frameId: string) {
-        const promise = this.callbacks.get(frameId);
-        if (promise) {
-            promise.resolve();
-        }
-    }
-
-    private handleNak(frameId: string) {
-        const promise = this.callbacks.get(frameId);
-        if (promise) {
-            promise.reject("NAK");
-        }
-    }
-
-    private sendFrame(frame: VcmpFrame) {
-        if (this.webSocket) {
-            this.webSocket.send(serializeVcmpFrame(frame));
-        }
-    }
 
     private info(...data: any[]) {
         this.options.debug?.info(...data);
@@ -256,18 +152,3 @@ export class VcmpClient {
         this.options.debug?.error(...data);
     }
 }
-
-function detectAsyncExecute() {
-    if (typeof queueMicrotask == "function") {
-        return queueMicrotask;
-    }
-    else if (typeof setImmediate == "function") {
-        return setImmediate;
-    }
-    else {
-        return (callback: VoidFunction) => Promise.resolve().then(callback);
-    }
-}
-
-const asyncExecute = detectAsyncExecute();
-
