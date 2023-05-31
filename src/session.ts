@@ -38,6 +38,7 @@ export class VcmpSession {
     public onClose?: CloseHandler;
 
     private heartbeatTimeout?: number | NodeJS.Timeout;
+    private heartbeatReceiveTimeout?: number | NodeJS.Timeout;
     private callbacks = new Map<string, PromiseCallbacks>();
 
     send<T extends VcmpMessage>(message: T) {
@@ -92,6 +93,9 @@ export class VcmpSession {
         if (this.heartbeatTimeout) {
             clearTimeout(this.heartbeatTimeout as any);
         }
+        if (this.heartbeatReceiveTimeout) {
+            clearTimeout(this.heartbeatReceiveTimeout as any);
+        }
         this.onClose && this.onClose();
     };
 
@@ -107,7 +111,17 @@ export class VcmpSession {
             const frame = parseVcmpFrame(event.data);
             switch (frame.type) {
                 case VcmpFrameType.HBT:
-                    this.heartbeatTimeout = setTimeout(() => this.sendFrame(frame), frame.heartbeatInterval);
+                    // clear previous heartbeat receive timeout
+                    clearTimeout(this.heartbeatReceiveTimeout as any);
+
+                    // send heartbeat after interval passes
+                    this.heartbeatTimeout = setTimeout(() => {
+                        // send the heartbeat
+                        this.sendFrame(frame);
+                        // set up a new heartbeat receive timeout, that closes the session
+                        // if we don't receive a heartbeat back within 2 x interval
+                        this.heartbeatReceiveTimeout = setTimeout(() => this.close(), 2 * frame.heartbeatInterval);
+                    }, frame.heartbeatInterval);
                     break;
 
                 case VcmpFrameType.ACK:

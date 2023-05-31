@@ -7,7 +7,7 @@ describe("VcmpServer", () => {
         const server = new VcmpServer({
             port: 12345,
         });
-        server.close();
+        server.stop();
     });
 
     it("can broadcast to clients", async () => {
@@ -27,25 +27,70 @@ describe("VcmpServer", () => {
             foo: "bar"
         });
 
-        await sleep(100);
+        await sleep(20);
 
         expect(messageCount).to.be.equal(2);
 
         client1.stop();
         client2.stop();
-        server.close();
+        await server.stop();
+    });
+
+    it("can send message to specific client", async () => {
+        const server = new VcmpServer({
+            port: 12345,
+        });
+        server.onSessionConnected = session => {
+            session.send({"@type": "foo"});
+        }
+        const client = createClient("ws://localhost:12345");
+        let messageCount = 0;
+        client.on("foo", () => { messageCount++ });
+        await awaitConnected(client);
+
+        await sleep(10);
+
+        client.stop();
+        await server.stop();
+
+        expect(messageCount).to.be.equal(1);
+    });
+
+    it("can receive message from client", async () => {
+        const server = new VcmpServer({
+            port: 12345,
+        });
+        let messageCount = 0;
+        server.on("foo", () => { messageCount++ });
+
+        const client = await createConnectedClient("ws://localhost:12345");
+        await client.send({"@type": "foo"});
+
+        client.stop();
+        await server.stop();
+
+        expect(messageCount).to.be.equal(1);
     });
 })
 
 
-function createConnectedClient(url: string) {
-    return new Promise<VcmpClient>((resolve, reject) => {
-        const client = new VcmpClient(url, {
-            autoStart: true,
-            customWebSocket: NodeWebSocket,
-        });
-        client.onOpen = () => resolve(client);
+async function createConnectedClient(url: string) {
+    const client = createClient(url);
+    await awaitConnected(client);
+    return client;
+}
+
+function createClient(url: string) {
+    return new VcmpClient(url, {
+        autoStart: true,
+        customWebSocket: NodeWebSocket,
     })
+}
+
+function awaitConnected(client: VcmpClient) {
+    return new Promise<void>((resolve) => {
+        client.onOpen = () => resolve();
+    });
 }
 
 function sleep(timeoutMs: number) {
