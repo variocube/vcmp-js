@@ -1,4 +1,5 @@
-import {VcmpClient, VcmpServer} from "../src";
+import {VcmpClient} from "../src";
+import {VcmpServer} from "../src/server";
 import {expect} from "chai";
 import * as NodeWebSocket from "ws";
 
@@ -71,7 +72,8 @@ describe("VcmpServer", () => {
 
         expect(messageCount).to.be.equal(1);
     });
-})
+
+});
 
 
 async function createConnectedClient(url: string) {

@@ -1,9 +1,12 @@
 import {Server, ServerOptions} from 'ws';
-import {VcmpSession} from "./session";
-import {ConsoleLike, VcmpHandler, VcmpMessage} from "./types";
+import {VcmpSession} from "../session";
+import {ConsoleLike, VcmpHandler, VcmpMessage} from "../types";
 
 export type VcmpServerOptions = ServerOptions & {
+    /** A sink for debug messages. */
     debug?: ConsoleLike;
+
+    /** The heartbeat interval in milliseconds (default: 20000). */
     heartbeatInterval?: number;
 }
 
