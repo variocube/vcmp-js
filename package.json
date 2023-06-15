@@ -1,6 +1,6 @@
 {
   "name": "@variocube/vcmp",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Variocube Messaging Protocol",
   "main": "cjs/index.js",
   "module": "esm/index.js",
@@ -36,6 +36,16 @@
   "optionalDependencies": {
     "ws": "^8.13.0",
     "@types/ws": "^8.5.4"
+  },
+  "exports": {
+    ".": {
+      "types": "./esm/index.d.ts",
+      "default": "./esm/server/index.js"
+    },
+    "./server": {
+      "types": "./esm/server/index.d.ts",
+      "default": "./esm/server/index.js"
+    }
   },
   "publishConfig": {
     "registry": "https://npm.pkg.github.com/"
