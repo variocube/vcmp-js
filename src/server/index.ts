@@ -1,5 +1,5 @@
 import {Server, ServerOptions} from 'ws';
-import {VcmpSession} from "../session";
+import {VcmpSession} from "../session.js";
 import {ConsoleLike, VcmpHandler, VcmpMessage} from "../types";
 
 export type VcmpServerOptions = ServerOptions & {

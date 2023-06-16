@@ -40,7 +40,7 @@
   "exports": {
     ".": {
       "types": "./esm/index.d.ts",
-      "default": "./esm/server/index.js"
+      "default": "./esm/index.js"
     },
     "./server": {
       "types": "./esm/server/index.d.ts",

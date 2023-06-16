@@ -1,5 +1,5 @@
 import {CloseHandler, ConsoleLike, OpenHandler, VcmpHandler, VcmpMessage} from "./types";
-import {VcmpSession} from "./session";
+import {VcmpSession} from "./session.js";
 import * as NodeWebSocket from "ws";
 
 export interface Options {
