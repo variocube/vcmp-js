@@ -1,6 +1,6 @@
 {
   "name": "@variocube/vcmp",
-  "version": "2.0.4",
+  "version": "2.0.5",
   "description": "Variocube Messaging Protocol",
   "main": "cjs/index.js",
   "type": "module",
@@ -41,11 +41,13 @@
   "exports": {
     ".": {
       "types": "./esm/index.d.ts",
-      "default": "./esm/index.js"
+      "default": "./esm/index.js",
+      "require": "./cjs/index.js"
     },
     "./server": {
       "types": "./esm/server/index.d.ts",
-      "default": "./esm/server/index.js"
+      "default": "./esm/server/index.js",
+      "require": "./cjs/server/index.js"
     }
   },
   "publishConfig": {
