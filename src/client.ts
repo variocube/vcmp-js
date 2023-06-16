@@ -1,6 +1,6 @@
 import {CloseHandler, ConsoleLike, OpenHandler, VcmpHandler, VcmpMessage} from "./types";
 import {VcmpSession} from "./session.js";
-import * as NodeWebSocket from "ws";
+import NodeWebSocket from "ws";
 
 export interface Options {
     reconnectTimeout: number;

@@ -1,11 +1,13 @@
 {
   "compilerOptions": {
-    "outDir": "./cjs",
-    "module": "commonjs",
+    "outDir": "./esm",
+    "module": "ES2020",
     "target": "ES2017",
     "sourceMap": true,
     "strict": true,
-    "declaration": false,
+    "declaration": true,
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
     "experimentalDecorators": true,
     "moduleResolution": "node",
     "resolveJsonModule": true

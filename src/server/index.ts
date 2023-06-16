@@ -1,4 +1,4 @@
-import {Server, ServerOptions} from 'ws';
+import {ServerOptions, WebSocketServer} from 'ws';
 import {VcmpSession} from "../session.js";
 import {ConsoleLike, VcmpHandler, VcmpMessage} from "../types";
 
@@ -15,7 +15,7 @@ export type SessionDisconnected = (session: VcmpSession) => any;
 
 export class VcmpServer {
 
-    private readonly wss: Server;
+    private readonly wss: WebSocketServer;
 
     private readonly handlers = new Map<string, VcmpHandler<any>>();
     private readonly sessions = new Set<VcmpSession>();
@@ -31,12 +31,12 @@ export class VcmpServer {
         } = options || {};
 
 
-        const wss = new Server({
+        const wss = new WebSocketServer({
             ...wssOptions,
         });
-        wss.on("connection", ws => {
+        wss.on("connection", webSocket => {
             const session = new VcmpSession({
-                webSocket: ws,
+                webSocket: webSocket,
                 resolver: type => this.handlers.get(type),
                 debug: options?.debug,
             });

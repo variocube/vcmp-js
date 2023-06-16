@@ -1,5 +1,5 @@
 import {expect} from "chai";
-import {generateVcmpFrameId} from "../src/frame";
+import {generateVcmpFrameId} from "../src/frame.js";
 
 describe('frame', () => {
     it('can generate frame id', () => {

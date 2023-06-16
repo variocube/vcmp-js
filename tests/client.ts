@@ -1,5 +1,6 @@
-import {VcmpClient} from "../src";
+import {VcmpClient} from "../src/client.js";
 import { expect } from "chai";
+import WebSocket from "ws";
 
 interface SampleMessage {
     "@type": "SampleType"
@@ -8,7 +9,7 @@ interface SampleMessage {
 describe('VcmpClient', () => {
     it('can instantiate client and start/stop', () => {
         const client = new VcmpClient("ws://localhost:22", {
-            customWebSocket: require("ws")
+            customWebSocket: WebSocket
         });
         client.start();
         client.stop();

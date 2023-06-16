@@ -1,7 +1,7 @@
-import {VcmpClient} from "../src";
-import {VcmpServer} from "../src/server";
+import {VcmpClient} from "../src/client.js";
+import {VcmpServer} from "../src/server/index.js";
 import {expect} from "chai";
-import * as NodeWebSocket from "ws";
+import NodeWebSocket from "ws";
 
 describe("VcmpServer", () => {
     it("can instantiate and close", () => {
