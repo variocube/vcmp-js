@@ -11,7 +11,7 @@
   },
   "scripts": {
     "build": "tsc && tsc -m commonjs --outDir ./cjs",
-    "test": "mocha -r ts-node/register --colors tests/**/*.ts"
+    "test": "mocha --esm --loader=ts-node/esm --colors tests/**/*.ts"
   },
   "repository": {
     "type": "git",
