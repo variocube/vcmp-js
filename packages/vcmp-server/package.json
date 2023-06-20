@@ -1,6 +1,6 @@
 {
   "name": "@variocube/vcmp-server",
-  "version": "2.0.6",
+  "version": "2.1.0",
   "description": "Variocube Messaging Protocol Server",
   "main": "cjs/index.js",
   "module": "esm/index.js",
@@ -26,7 +26,7 @@
     "registry": "https://npm.pkg.github.com/"
   },
   "dependencies": {
-    "@variocube/vcmp": "^2.0.6",
+    "@variocube/vcmp": "^2.1.0",
     "ws": "^8.13.0"
   },
   "files": [
