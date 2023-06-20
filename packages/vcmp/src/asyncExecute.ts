@@ -1,4 +1,6 @@
-
+/**
+ * Detects the best way to schedule async execution of a small task.
+ */
 function detectAsyncExecute() {
     if (typeof queueMicrotask == "function") {
         return queueMicrotask;
@@ -12,4 +14,3 @@ function detectAsyncExecute() {
 }
 
 export const asyncExecute = detectAsyncExecute();
-

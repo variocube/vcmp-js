@@ -5,7 +5,7 @@ VCMP is a very simple, lightweight and generic messaging protocol over WebSocket
 
 ## Usage
 
-### Installation
+### Using the client
 
 Install the package:
 
@@ -13,7 +13,7 @@ Install the package:
 npm install @variocube/vcmp
 ```
 
-### Using the client
+Simple example:
 
 ```typescript
 import {VcmpClient} from "@variocube/vcmp";
@@ -25,15 +25,16 @@ client.send({"@type": "hello", from: "client"});
 
 ### Using the server
 
-The server additionally requires the Node WebSocket implementation:
+Install the package:
 
 ```shell
-npm install ws
-npm install -D @types/ws
+npm install @variocube/vcmp-server
 ```
 
+Simple example:
+
 ```typescript
-import {VcmpServer} from "@variocube/vcmp/server";
+import {VcmpServer} from "@variocube/vcmp-server";
 
 const server = new VcmpServer({port: 12345});
 server.on("hello", ({from}) => console.log(`Received a hello from ${from}.`));
