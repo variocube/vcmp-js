@@ -1,6 +1,6 @@
 {
   "name": "@variocube/vcmp",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "Variocube Messaging Protocol",
   "main": "cjs/index.js",
   "module": "esm/index.js",

@@ -12,22 +12,22 @@ export enum VcmpFrameType {
     HBT = "HBT"
 }
 
-interface VcmpHeartbeatFrame {
+export interface VcmpHeartbeatFrame {
     type: VcmpFrameType.HBT;
     heartbeatInterval: number;
 }
 
-interface VcmpAckFrame {
+export interface VcmpAckFrame {
     type: VcmpFrameType.ACK;
     id: string;
 }
 
-interface VcmpNakFrame {
+export interface VcmpNakFrame {
     type: VcmpFrameType.NAK;
     id: string;
 }
 
-interface VcmpMessageFrame {
+export interface VcmpMessageFrame {
     type: VcmpFrameType.MSG;
     id: string;
     payload: string;

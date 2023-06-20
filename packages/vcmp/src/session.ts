@@ -1,4 +1,11 @@
-import {generateVcmpFrameId, parseVcmpFrame, serializeVcmpFrame, VcmpFrame, VcmpFrameType} from "./frame";
+import {
+    generateVcmpFrameId,
+    parseVcmpFrame,
+    serializeVcmpFrame,
+    VcmpFrame,
+    VcmpFrameType,
+    VcmpHeartbeatFrame
+} from "./frame";
 import {CloseHandler, ConsoleLike, OpenHandler, VcmpHandler, VcmpMessage} from "./types";
 import {asyncExecute} from "./asyncExecute";
 import NodeWebSocket from "ws";
@@ -39,6 +46,8 @@ export class VcmpSession {
 
     private heartbeatTimeout?: number | NodeJS.Timeout;
     private heartbeatReceiveTimeout?: number | NodeJS.Timeout;
+    private awaitingHeartbeat = true;
+
     private callbacks = new Map<string, PromiseCallbacks>();
 
     send<T extends VcmpMessage>(message: T) {
@@ -85,6 +94,7 @@ export class VcmpSession {
 
     private handleOpen = () => {
         this.debug?.info("WebSocket session open");
+        this.awaitingHeartbeat = true;
         this.onOpen && this.onOpen();
     };
 
@@ -111,17 +121,7 @@ export class VcmpSession {
             const frame = parseVcmpFrame(event.data);
             switch (frame.type) {
                 case VcmpFrameType.HBT:
-                    // clear previous heartbeat receive timeout
-                    clearTimeout(this.heartbeatReceiveTimeout as any);
-
-                    // send heartbeat after interval passes
-                    this.heartbeatTimeout = setTimeout(() => {
-                        // send the heartbeat
-                        this.sendFrame(frame);
-                        // set up a new heartbeat receive timeout, that closes the session
-                        // if we don't receive a heartbeat back within 2 x interval
-                        this.heartbeatReceiveTimeout = setTimeout(() => this.close(), 2 * frame.heartbeatInterval);
-                    }, frame.heartbeatInterval);
+                    this.handleHeartbeatReceived(frame);
                     break;
 
                 case VcmpFrameType.ACK:
@@ -138,6 +138,40 @@ export class VcmpSession {
             }
         }
     };
+
+    private handleHeartbeatReceived(frame: VcmpHeartbeatFrame) {
+        // check whether we are currently awaiting a heartbeat
+        if (this.awaitingHeartbeat) {
+            // clear the flag that we are awaiting a heartbeat
+            this.awaitingHeartbeat = false;
+
+            this.debug?.info("Received heartbeat.");
+
+            // clear previous heartbeat receive timeout
+            clearTimeout(this.heartbeatReceiveTimeout as any);
+
+            // send heartbeat after the interval passes
+            this.heartbeatTimeout = setTimeout(() => {
+                this.debug?.info("Sending heartbeat.");
+
+                // send the heartbeat
+                this.sendFrame(frame);
+
+                // set the flag that we await a heartbeat
+                this.awaitingHeartbeat = true;
+
+                // set up a new heartbeat receive timeout, that closes the session
+                // if we don't receive a heartbeat back within 2 x interval
+                this.heartbeatReceiveTimeout = setTimeout(() => {
+                    this.debug?.warn("Did not receive heartbeat in time. Closing session.");
+                    this.close();
+                }, 2 * frame.heartbeatInterval);
+            }, frame.heartbeatInterval);
+        }
+        else {
+            this.debug?.warn("Ignoring unexpected heartbeat.");
+        }
+    }
 
     private handleVcmpMessage(frameId: string, payload: string) {
         const message = JSON.parse(payload);
