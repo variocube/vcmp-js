@@ -2,17 +2,6 @@
   "name": "@variocube/vcmp",
   "version": "2.0.5",
   "description": "Variocube Messaging Protocol",
-  "main": "cjs/index.js",
-  "type": "module",
-  "module": "esm/index.js",
-  "types": "esm/index.d.ts",
-  "browser": {
-    "./esm/random.js": "./esm/random-browser.js"
-  },
-  "scripts": {
-    "build": "tsc && tsc -m commonjs --outDir ./cjs",
-    "test": "mocha --esm --loader=ts-node/esm --colors tests/**/*.ts"
-  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/variocube/vcmp-js.git"
@@ -29,33 +18,19 @@
     "@types/node": "^20.3.1",
     "@types/ws": "^8.5.4",
     "chai": "^4.3.4",
+    "lerna": "^7.0.2",
     "mocha": "^10.2.0",
     "ts-node": "^10.9.1",
     "typescript": "^4.7.4",
     "ws": "^8.13.0"
   },
-  "optionalDependencies": {
-    "ws": "^8.13.0",
-    "@types/ws": "^8.5.4"
+  "dependencies": {
+    "@variocube/vcmp": "file:packages/vcmp",
+    "@variocube/vcmp-server": "file:packages/vcmp-server"
   },
-  "exports": {
-    ".": {
-      "types": "./esm/index.d.ts",
-      "default": "./esm/index.js",
-      "require": "./cjs/index.js"
-    },
-    "./server": {
-      "types": "./esm/server/index.d.ts",
-      "default": "./esm/server/index.js",
-      "require": "./cjs/server/index.js"
-    }
-  },
-  "publishConfig": {
-    "registry": "https://npm.pkg.github.com/"
-  },
-  "files": [
-    "cjs/**/*",
-    "esm/**/*",
-    "src/**/*"
-  ]
+  "scripts": {
+    "build": "lerna run build",
+    "test": "lerna run test",
+    "publish": "lerna publish"
+  }
 }

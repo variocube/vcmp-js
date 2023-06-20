@@ -1,4 +1,4 @@
-import {getRandomBytesBase64} from "./random.js";
+import {getRandomBytesBase64} from "./random";
 
 /**
  * Generates a random number of `entropyBytes` length and encodes

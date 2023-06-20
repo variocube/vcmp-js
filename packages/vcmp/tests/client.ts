@@ -1,4 +1,4 @@
-import {VcmpClient} from "../src/client.js";
+import {VcmpClient} from "@variocube/vcmp";
 import { expect } from "chai";
 import WebSocket from "ws";
 

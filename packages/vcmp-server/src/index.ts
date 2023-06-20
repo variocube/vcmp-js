@@ -1,6 +1,5 @@
 import {ServerOptions, WebSocketServer} from 'ws';
-import {VcmpSession} from "../session.js";
-import {ConsoleLike, VcmpHandler, VcmpMessage} from "../types";
+import {ConsoleLike, VcmpHandler, VcmpMessage, VcmpSession} from "@variocube/vcmp";
 
 export type VcmpServerOptions = ServerOptions & {
     /** A sink for debug messages. */

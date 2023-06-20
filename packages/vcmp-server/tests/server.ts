@@ -1,5 +1,5 @@
-import {VcmpClient} from "../src/client.js";
-import {VcmpServer} from "../src/server/index.js";
+import {VcmpClient} from "@variocube/vcmp";
+import {VcmpServer} from "../src";
 import {expect} from "chai";
 import NodeWebSocket from "ws";
 

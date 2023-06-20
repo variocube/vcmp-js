@@ -1,6 +1,6 @@
-import {generateVcmpFrameId, parseVcmpFrame, serializeVcmpFrame, VcmpFrame, VcmpFrameType} from "./frame.js";
+import {generateVcmpFrameId, parseVcmpFrame, serializeVcmpFrame, VcmpFrame, VcmpFrameType} from "./frame";
 import {CloseHandler, ConsoleLike, OpenHandler, VcmpHandler, VcmpMessage} from "./types";
-import {asyncExecute} from "./asyncExecute.js";
+import {asyncExecute} from "./asyncExecute";
 import NodeWebSocket from "ws";
 import {MessageEvent} from "ws";
 

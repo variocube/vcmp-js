@@ -1,5 +1,5 @@
 import {expect} from "chai";
-import {generateVcmpFrameId} from "../src/frame.js";
+import {generateVcmpFrameId} from "@variocube/vcmp";
 
 describe('frame', () => {
     it('can generate frame id', () => {

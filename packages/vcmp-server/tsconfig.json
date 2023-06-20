@@ -1,7 +1,7 @@
 {
   "compilerOptions": {
-    "outDir": "./esm",
-    "module": "ES2020",
+    "outDir": "./cjs",
+    "module": "CommonJS",
     "target": "ES2017",
     "sourceMap": true,
     "strict": true,

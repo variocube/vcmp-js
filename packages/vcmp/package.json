@@ -1,0 +1,33 @@
+{
+  "name": "@variocube/vcmp",
+  "version": "2.0.5",
+  "description": "Variocube Messaging Protocol",
+  "main": "cjs/index.js",
+  "module": "esm/index.js",
+  "types": "esm/index.d.ts",
+  "browser": {
+    "./esm/random.js": "./esm/random-browser.js"
+  },
+  "scripts": {
+    "build": "tsc && tsc -m ES2020 --outDir ./esm",
+    "test": "mocha -r ts-node/register --colors tests/**/*.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/variocube/vcmp-js.git"
+  },
+  "author": "Variocube",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/variocube/vcmp-js/issues"
+  },
+  "homepage": "https://github.com/variocube/vcmp-js#readme",
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com/"
+  },
+  "files": [
+    "cjs/**/*",
+    "esm/**/*",
+    "src/**/*"
+  ]
+}

@@ -1,4 +1,4 @@
-import {generateRandomId} from "./generateRandomId.js";
+import {generateRandomId} from "./generateRandomId";
 
 const ID_LENGTH = 12;
 const ID_INDEX = 3;
