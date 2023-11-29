@@ -65,7 +65,7 @@ export class VcmpSession {
     }
 
     get isOpen() {
-        return this.webSocket.readyState == WebSocket.OPEN; // 1...OPEN
+        return this.webSocket.readyState == 1; // 1...OPEN
     }
 
     initiateHeartbeat(heartbeatInterval: number) {
