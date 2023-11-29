@@ -93,13 +93,17 @@ export class VcmpSession {
     }
 
     private handleOpen = () => {
-        this.debug?.info("WebSocket session open");
+        this.debug?.debug("WebSocket session open");
         this.awaitingHeartbeat = true;
         this.onOpen && this.onOpen();
     };
 
     private handleClose = (event: CloseEvent | NodeWebSocket.CloseEvent) => {
-        this.debug?.info("WebSocket session closed", event);
+        this.debug?.debug("WebSocket session closed", {
+            type: event.type,
+            code: event.code,
+            reason: event.reason
+        });
         if (this.heartbeatTimeout) {
             clearTimeout(this.heartbeatTimeout as any);
         }
@@ -145,14 +149,14 @@ export class VcmpSession {
             // clear the flag that we are awaiting a heartbeat
             this.awaitingHeartbeat = false;
 
-            this.debug?.info("Received heartbeat.");
+            this.debug?.debug("Received heartbeat.");
 
             // clear previous heartbeat receive timeout
             clearTimeout(this.heartbeatReceiveTimeout as any);
 
             // send heartbeat after the interval passes
             this.heartbeatTimeout = setTimeout(() => {
-                this.debug?.info("Sending heartbeat.");
+                this.debug?.debug("Sending heartbeat.");
 
                 // send the heartbeat
                 this.sendFrame(frame);

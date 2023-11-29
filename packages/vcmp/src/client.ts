@@ -39,7 +39,7 @@ export class VcmpClient {
             ...options,
         };
 
-        this.debug(`Constructed VcmpClient for URL: ${this.url} and the following options`, this.options);
+        this.debug(`Constructed VcmpClient for URL ${this.url} and the following options`, this.options);
 
         if (this.options.autoStart) {
             this.debug(`Autostarting VcmpClient for URL: ${this.url}`);
@@ -60,7 +60,7 @@ export class VcmpClient {
             clearTimeout(this.reconnectTimeout as any);
         }
         if (this.session) {
-            this.debug(`VcmpClient, websocket open, closing`);
+            this.debug(`Closing VCMP session`);
             this.session.close();
         }
     }
@@ -126,12 +126,12 @@ export class VcmpClient {
     }
 
     private handleOpen = () => {
-        this.info("WebSocket session open");
+        this.debug("VCMP session open");
         this.onOpen && this.onOpen();
     };
 
     private handleClose = () => {
-        this.info("WebSocket session closed");
+        this.debug("VCMP session closed");
         this.onClose && this.onClose();
         this.scheduleReconnect();
     };
