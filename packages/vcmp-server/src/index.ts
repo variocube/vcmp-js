@@ -7,6 +7,9 @@ export type VcmpServerOptions = ServerOptions & {
 
     /** The heartbeat interval in milliseconds (default: 20000). */
     heartbeatInterval?: number;
+
+    /** The web socket server. If none is passed, one is constructed from the passed options. */
+    webSocketServer?: WebSocketServer;
 }
 
 export type SessionConnected = (session: VcmpSession) => any;
@@ -26,14 +29,15 @@ export class VcmpServer {
         const {
             debug,
             heartbeatInterval = 20000,
+            webSocketServer,
             ...wssOptions
         } = options || {};
 
 
-        const wss = new WebSocketServer({
+        this.wss = webSocketServer ?? new WebSocketServer({
             ...wssOptions,
         });
-        wss.on("connection", webSocket => {
+        this.wss.on("connection", webSocket => {
             const session = new VcmpSession({
                 webSocket: webSocket,
                 resolver: type => this.handlers.get(type),
@@ -50,9 +54,6 @@ export class VcmpServer {
             this.sessions.add(session);
             this.onSessionConnected(session);
         });
-
-
-        this.wss = wss;
     }
 
     stop() {
