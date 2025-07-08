@@ -1,6 +1,6 @@
 {
   "name": "@variocube/vcmp",
-  "version": "2.3.0-alpha.2",
+  "version": "2.3.0",
   "description": "Variocube Messaging Protocol",
   "license": "MIT",
   "main": "cjs/index.js",
