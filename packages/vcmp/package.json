@@ -22,9 +22,6 @@
     "url": "https://github.com/variocube/vcmp-js/issues"
   },
   "homepage": "https://github.com/variocube/vcmp-js#readme",
-  "publishConfig": {
-    "registry": "https://npm.pkg.github.com/"
-  },
   "files": [
     "cjs/**/*",
     "esm/**/*",
