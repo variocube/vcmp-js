@@ -30,5 +30,8 @@
     "cjs/**/*",
     "esm/**/*",
     "src/**/*"
-  ]
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
 }
