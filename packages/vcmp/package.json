@@ -2,6 +2,7 @@
   "name": "@variocube/vcmp",
   "version": "2.3.0-alpha.0",
   "description": "Variocube Messaging Protocol",
+  "license": "MIT",
   "main": "cjs/index.js",
   "module": "esm/index.js",
   "types": "esm/index.d.ts",
@@ -17,7 +18,6 @@
     "url": "git+https://github.com/variocube/vcmp-js.git"
   },
   "author": "Variocube",
-  "license": "ISC",
   "bugs": {
     "url": "https://github.com/variocube/vcmp-js/issues"
   },
