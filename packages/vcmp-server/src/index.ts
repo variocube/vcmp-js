@@ -58,6 +58,10 @@ export class VcmpServer {
 
     stop() {
         return new Promise<void>((resolve, reject) => {
+            // Close sessions
+            this.sessions.forEach(session => session.close());
+
+            // Close server
             this.wss.close(err => {
                 if (err) {
                     reject(err);
