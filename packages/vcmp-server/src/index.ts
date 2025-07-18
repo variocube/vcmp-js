@@ -17,10 +17,10 @@ export type SessionDisconnected = (session: VcmpSession) => any;
 
 export class VcmpServer {
 
-    private readonly wss: WebSocketServer;
+    readonly #wss: WebSocketServer;
 
-    private readonly handlers = new Map<string, VcmpHandler<any>>();
-    private readonly sessions = new Set<VcmpSession>();
+    readonly #handlers = new Map<string, VcmpHandler<any>>();
+    readonly #sessions = new Set<VcmpSession>();
 
     public onSessionConnected: SessionConnected = () => void 0;
     public onSessionDisconnected: SessionDisconnected = () => void 0;
@@ -34,24 +34,24 @@ export class VcmpServer {
         } = options || {};
 
 
-        this.wss = webSocketServer ?? new WebSocketServer({
+        this.#wss = webSocketServer ?? new WebSocketServer({
             ...wssOptions,
         });
-        this.wss.on("connection", webSocket => {
+        this.#wss.on("connection", webSocket => {
             const session = new VcmpSession({
                 webSocket: webSocket,
-                resolver: type => this.handlers.get(type),
+                resolver: type => this.#handlers.get(type),
                 debug: options?.debug,
             });
 
             session.onClose = () => {
-                this.sessions.delete(session);
+                this.#sessions.delete(session);
                 this.onSessionDisconnected(session);
             }
 
             session.initiateHeartbeat(heartbeatInterval);
 
-            this.sessions.add(session);
+            this.#sessions.add(session);
             this.onSessionConnected(session);
         });
     }
@@ -59,10 +59,10 @@ export class VcmpServer {
     stop() {
         return new Promise<void>((resolve, reject) => {
             // Close sessions
-            this.sessions.forEach(session => session.close());
+            this.#sessions.forEach(session => session.close());
 
             // Close server
-            this.wss.close(err => {
+            this.#wss.close(err => {
                 if (err) {
                     reject(err);
                 }
@@ -74,16 +74,20 @@ export class VcmpServer {
     }
 
     on<T extends VcmpMessage>(messageType: string, handler: VcmpHandler<T>) {
-        this.handlers.set(messageType, handler);
+        this.#handlers.set(messageType, handler);
     }
 
     off<T extends VcmpMessage>(messageType: string) {
-        this.handlers.delete(messageType);
+        this.#handlers.delete(messageType);
     }
 
     broadcast<T extends VcmpMessage>(message: T) {
-        for (const session of this.sessions) {
+        for (const session of this.#sessions) {
             session.send(message);
         }
+    }
+
+    get sessions() {
+        return [...this.#sessions];
     }
 }
