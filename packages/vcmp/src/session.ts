@@ -115,7 +115,7 @@ export class VcmpSession {
 
     private handleError = () => {
         this.debug?.warn("WebSocket session error");
-        if (this.webSocket) {
+        if (this.isOpen) {
             this.webSocket.close();
         }
     };
