@@ -12,7 +12,15 @@ describe('VcmpClient', () => {
             customWebSocket: WebSocket
         });
         client.start();
-        client.stop();
+        setTimeout(() => client.stop(), 10);
+    });
+
+    it('can instantiate client and start/stop 2', () => {
+        const client = new VcmpClient("ws://localhost:12345", {
+            customWebSocket: WebSocket
+        });
+        client.start();
+        setTimeout(() => client.stop(), 10);
     });
 
     it('can attach listener', () => {
