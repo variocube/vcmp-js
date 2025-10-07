@@ -1,6 +1,6 @@
 {
   "name": "@variocube/vcmp-server",
-  "version": "2.4.2",
+  "version": "2.4.3",
   "description": "Variocube Messaging Protocol Server",
   "license": "MIT",
   "main": "cjs/index.js",
@@ -23,7 +23,7 @@
   },
   "homepage": "https://github.com/variocube/vcmp-js#readme",
   "dependencies": {
-    "@variocube/vcmp": "^2.4.2",
+    "@variocube/vcmp": "^2.4.3",
     "ws": "^8.13.0"
   },
   "files": [
