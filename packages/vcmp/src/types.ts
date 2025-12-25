@@ -1,6 +1,6 @@
 import {VcmpSession} from "./session";
 
-export type VcmpHandler<T> = (message: T, session: VcmpSession) => Promise<void> | void;
+export type VcmpHandler<T> = (message: T, session: VcmpSession) => Promise<any> | any;
 export type OpenHandler = () => any;
 export type CloseHandler = () => any;
 

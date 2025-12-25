@@ -1,18 +1,11 @@
-import {
-    generateVcmpFrameId,
-    parseVcmpFrame,
-    serializeVcmpFrame,
-    VcmpFrame,
-    VcmpFrameType,
-    VcmpHeartbeatFrame
-} from "./frame";
+import {generateVcmpFrameId, parseVcmpFrame, serializeVcmpFrame, VcmpFrame, VcmpHeartbeatFrame} from "./frame";
 import {CloseHandler, ConsoleLike, OpenHandler, VcmpHandler, VcmpMessage} from "./types";
 import {asyncExecute} from "./asyncExecute";
-import NodeWebSocket from "ws";
-import {MessageEvent} from "ws";
+import NodeWebSocket, {MessageEvent} from "ws";
+import {createVcmpError, VcmpError} from "./error";
 
 type PromiseCallbacks = {
-    resolve: () => void;
+    resolve: (result?: any) => void;
     reject: (reason?: any) => void;
 }
 
@@ -52,11 +45,11 @@ export class VcmpSession {
 
     send<T extends VcmpMessage>(message: T) {
         this.debug?.debug("Sending VcmpMessage", message);
-        return new Promise<void>((resolve, reject) => {
+        return new Promise<any>((resolve, reject) => {
             const payload = JSON.stringify(message);
             const id = generateVcmpFrameId();
             this.callbacks.set(id, {resolve, reject});
-            this.sendFrame({type: VcmpFrameType.MSG, id, payload});
+            this.sendFrame({type: "MSG", id, payload});
         });
     }
 
@@ -69,26 +62,34 @@ export class VcmpSession {
     }
 
     initiateHeartbeat(heartbeatInterval: number) {
-        this.sendFrame({type: VcmpFrameType.HBT, heartbeatInterval});
+        this.sendFrame({type: "HBT", heartbeatInterval});
     }
 
-    private handleAck(frameId: string) {
+    private handleAck(frameId: string, payload: string | undefined) {
         const promise = this.callbacks.get(frameId);
         if (promise) {
-            promise.resolve();
+			const result = payload ? JSON.parse(payload) : undefined;
+            promise.resolve(result);
         }
     }
 
-    private handleNak(frameId: string) {
+    private handleNak(frameId: string, payload: string | undefined) {
         const promise = this.callbacks.get(frameId);
         if (promise) {
-            promise.reject("NAK");
+			const error = payload ? createVcmpError(JSON.parse(payload)) : new VcmpError({
+				title: "Message handling failed",
+				status: 500,
+				detail: "Unspecified error in message handling."
+			});
+            promise.reject(error);
         }
     }
 
     private sendFrame(frame: VcmpFrame) {
         if (this.webSocket) {
-            this.webSocket.send(serializeVcmpFrame(frame));
+			const serializedFrame = serializeVcmpFrame(frame);
+			this.debug?.debug("Sending frame", serializedFrame);
+			this.webSocket.send(serializedFrame);
         }
     }
 
@@ -122,21 +123,23 @@ export class VcmpSession {
 
     private handleMessage = (event: MessageEvent | NodeWebSocket.MessageEvent) => {
         if (typeof event.data == "string") {
+			this.debug?.debug("Received frame", event.data);
             const frame = parseVcmpFrame(event.data);
+			this.debug?.debug("Parsed frame", frame);
             switch (frame.type) {
-                case VcmpFrameType.HBT:
+                case "HBT":
                     this.handleHeartbeatReceived(frame);
                     break;
 
-                case VcmpFrameType.ACK:
-                    this.handleAck(frame.id);
+                case "ACK":
+                    this.handleAck(frame.id, frame.payload);
                     break;
 
-                case VcmpFrameType.NAK:
-                    this.handleNak(frame.id);
+                case "NAK":
+                    this.handleNak(frame.id, frame.payload);
                     break;
 
-                case VcmpFrameType.MSG:
+                case "MSG":
                     this.handleVcmpMessage(frame.id, frame.payload);
                     break;
             }
@@ -177,26 +180,26 @@ export class VcmpSession {
         }
     }
 
-    private handleVcmpMessage(frameId: string, payload: string) {
-        const message = JSON.parse(payload);
+    private handleVcmpMessage(frameId: string, payload: string | undefined) {
+        const message = payload ? JSON.parse(payload) : {} as any;
         const type = message["@type"];
         if (type) {
             const handler = this.resolver(type);
             if (handler) {
                 asyncExecute(async () => {
                     try {
-                        await handler(message, this);
-                        this.sendFrame({type: VcmpFrameType.ACK, id: frameId});
+                        const result = await handler(message, this);
+                        this.sendFrame({type: "ACK", id: frameId, payload: result ? JSON.stringify(result) : undefined});
                     }
                     catch (error) {
                         this.debug?.warn("Error in handler, sending NAK", error);
-                        this.sendFrame({type: VcmpFrameType.NAK, id: frameId});
+                        this.sendFrame({type: "NAK", id: frameId, payload: JSON.stringify(createVcmpError(error))});
                     }
                 });
             }
             else {
                 this.debug?.warn("No handler found for message, sending NAK", message);
-                this.sendFrame({type: VcmpFrameType.NAK, id: frameId});
+                this.sendFrame({type: "NAK", id: frameId});
             }
         }
         else {
