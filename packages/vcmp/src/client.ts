@@ -1,154 +1,161 @@
-import {CloseHandler, ConsoleLike, OpenHandler, VcmpHandler, VcmpMessage} from "./types";
-import {VcmpSession} from "./session";
 import NodeWebSocket from "ws";
+import {VcmpSession} from "./session";
+import {CloseHandler, ConsoleLike, OpenHandler, VcmpHandler, VcmpMessage} from "./types";
 
 export interface Options {
-    reconnectTimeout: number;
-    autoStart: boolean;
-    customWebSocket?: (typeof NodeWebSocket) | (typeof WebSocket);
-    debug?: ConsoleLike;
+	reconnectTimeout: number;
+	autoStart: boolean;
+	customWebSocket?: (typeof NodeWebSocket) | (typeof WebSocket);
+	debug?: ConsoleLike;
+	/**
+	 * Timeout in milliseconds for awaiting the acknowledgement of a sent message.
+	 * When it elapses, the promise returned from `send` rejects with a `VcmpError` (status 504).
+	 * Defaults to `DEFAULT_ACK_TIMEOUT`. A value of 0 or below disables the timeout.
+	 */
+	ackTimeout?: number;
 }
 
 const defaultOptions: Options = {
-    reconnectTimeout: 10000,
-    autoStart: false,
+	reconnectTimeout: 10000,
+	autoStart: false,
 };
 
 export class VcmpClient {
+	private readonly url: string;
+	private readonly options: Options;
 
-    private readonly url: string;
-    private readonly options: Options;
+	private running = false;
+	private waitingForReconnect = false;
+	private session?: VcmpSession;
 
-    private running = false;
-    private waitingForReconnect = false;
-    private session?: VcmpSession;
+	private reconnectTimeout?: number | NodeJS.Timeout;
 
-    private reconnectTimeout?: number | NodeJS.Timeout;
+	private handler = new Map<string, VcmpHandler<any>>();
 
-    private handler = new Map<string, VcmpHandler<any>>();
+	public onOpen?: OpenHandler;
+	public onClose?: CloseHandler;
 
-    public onOpen?: OpenHandler;
-    public onClose?: CloseHandler;
+	constructor(url: string, options?: Partial<Options>) {
+		this.url = url;
 
-    constructor(url: string, options?: Partial<Options>) {
+		this.options = {
+			...defaultOptions,
+			...options,
+		};
 
-        this.url = url;
+		this.debug(`Constructed VcmpClient for URL ${this.url} and the following options`, this.options);
 
-        this.options = {
-            ...defaultOptions,
-            ...options,
-        };
+		if (this.options.autoStart) {
+			this.debug(`Autostarting VcmpClient for URL: ${this.url}`);
+			this.start();
+		}
+	}
 
-        this.debug(`Constructed VcmpClient for URL ${this.url} and the following options`, this.options);
+	start() {
+		this.debug(`Starting VcmpClient for URL: ${this.url}`);
+		this.running = true;
+		this.initiateConnection();
+	}
 
-        if (this.options.autoStart) {
-            this.debug(`Autostarting VcmpClient for URL: ${this.url}`);
-            this.start();
-        }
-    }
+	stop() {
+		this.debug(`Stopping VcmpClient for URL: ${this.url}`);
+		this.running = false;
+		if (this.reconnectTimeout) {
+			clearTimeout(this.reconnectTimeout as any);
+		}
+		if (this.session) {
+			this.debug(`Closing VCMP session`);
+			this.session.close();
+		}
+	}
 
-    start() {
-        this.debug(`Starting VcmpClient for URL: ${this.url}`);
-        this.running = true;
-        this.initiateConnection();
-    }
+	get connected() {
+		return this.session?.isOpen;
+	}
 
-    stop() {
-        this.debug(`Stopping VcmpClient for URL: ${this.url}`);
-        this.running = false;
-        if (this.reconnectTimeout) {
-            clearTimeout(this.reconnectTimeout as any);
-        }
-        if (this.session) {
-            this.debug(`Closing VCMP session`);
-            this.session.close();
-        }
-    }
+	send<T extends VcmpMessage>(message: T) {
+		this.debug("Sending VcmpMessage", message);
+		if (this.session) {
+			return this.session.send(message);
+		}
+		else {
+			return Promise.reject(new Error("No session."));
+		}
+	}
 
-    get connected() {
-        return this.session?.isOpen;
-    }
+	private initiateConnection = () => {
+		this.debug("Initiating connection");
+		if (this.running) {
+			this.debug("Initiating connection");
+			const webSocketConstructor = this.options.customWebSocket || WebSocket;
+			if (typeof webSocketConstructor !== "function") {
+				throw new Error(
+					"WebSocket constructor not found. If running on Node, please install the `ws` package and pass it as customWebSocket in options.",
+				);
+			}
 
-    send<T extends VcmpMessage>(message: T) {
-        this.debug("Sending VcmpMessage", message);
-        if (this.session) {
-            return this.session.send(message);
-        }
-        else {
-            return Promise.reject(new Error("No session."));
-        }
-    }
+			this.debug("Constructing websocket");
+			const webSocket = new webSocketConstructor(this.url);
+			this.debug("Connecting handlers");
+			this.session = new VcmpSession({
+				webSocket,
+				resolver: type => this.handler.get(type),
+				debug: this.options.debug,
+				ackTimeout: this.options.ackTimeout,
+			});
+			this.session.onOpen = this.handleOpen;
+			this.session.onClose = this.handleClose;
+		}
+		else {
+			this.debug("Already running, ignoring call to initiateConnection");
+		}
+	};
 
-    private initiateConnection = () => {
-        this.debug("Initiating connection");
-        if (this.running) {
-            this.debug("Initiating connection");
-            const webSocketConstructor = this.options.customWebSocket || WebSocket;
-            if (typeof webSocketConstructor !== "function") {
-                throw new Error("WebSocket constructor not found. If running on Node, please install the `ws` package and pass it as customWebSocket in options.");
-            }
+	on<T>(type: string, handler: VcmpHandler<T>) {
+		this.handler.set(type, handler);
+	}
 
-            this.debug("Constructing websocket");
-            const webSocket = new webSocketConstructor(this.url);
-            this.debug("Connecting handlers");
-            this.session = new VcmpSession({
-                webSocket,
-                resolver: type => this.handler.get(type),
-                debug: this.options.debug
-            });
-            this.session.onOpen = this.handleOpen;
-            this.session.onClose = this.handleClose;
-        }
-        else {
-            this.debug("Already running, ignoring call to initiateConnection");
-        }
-    };
+	off(type: string) {
+		this.handler.delete(type);
+	}
 
-    on<T>(type: string, handler: VcmpHandler<T>) {
-        this.handler.set(type, handler);
-    }
+	private scheduleReconnect() {
+		this.debug("Checking whether to schedule reconnect.");
+		this.session = undefined;
+		if (this.running && !this.waitingForReconnect) {
+			this.debug("Scheduling reconnect.");
+			this.waitingForReconnect = true;
+			this.reconnectTimeout = setTimeout(() => {
+				this.waitingForReconnect = false;
+				this.initiateConnection();
+			}, this.options.reconnectTimeout);
+		}
+	}
 
-    off(type: string) {
-        this.handler.delete(type);
-    }
+	private handleOpen = () => {
+		this.debug("VCMP session open");
+		this.onOpen && this.onOpen();
+	};
 
-    private scheduleReconnect() {
-        this.debug("Checking whether to schedule reconnect.");
-        this.session = undefined;
-        if (this.running && !this.waitingForReconnect) {
-            this.debug("Scheduling reconnect.");
-            this.waitingForReconnect = true;
-            this.reconnectTimeout = setTimeout(() => {
-                this.waitingForReconnect = false;
-                this.initiateConnection();
-            }, this.options.reconnectTimeout);
-        }
-    }
+	private handleClose = () => {
+		this.debug("VCMP session closed");
+		this.onClose && this.onClose();
+		this.scheduleReconnect();
+	};
 
-    private handleOpen = () => {
-        this.debug("VCMP session open");
-        this.onOpen && this.onOpen();
-    };
+	private info(...data: any[]) {
+		this.options.debug?.info(...data);
+	}
 
-    private handleClose = () => {
-        this.debug("VCMP session closed");
-        this.onClose && this.onClose();
-        this.scheduleReconnect();
-    };
+	private debug(...data: any[]) {
+		this.options.debug?.debug(...data);
+	}
 
-    private info(...data: any[]) {
-        this.options.debug?.info(...data);
-    }
+	private warn(...data: any[]) {
+		this.options.debug?.warn(...data);
+	}
 
-    private debug(...data: any[]) {
-        this.options.debug?.debug(...data);
-    }
-
-    private warn(...data: any[]) {
-        this.options.debug?.warn(...data);
-    }
-
-    private error(...data: any[]) {
-        this.options.debug?.error(...data);
-    }
+	private error(...data: any[]) {
+		this.options.debug?.error(...data);
+	}
 }

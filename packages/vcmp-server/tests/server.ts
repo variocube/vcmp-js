@@ -154,6 +154,81 @@ describe("VcmpServer", () => {
 			await server.stop();
 		}
 	});
+
+	it("rejects pending sends when the session closes before ack", async () => {
+		const server = new VcmpServer({
+			port: 12345,
+		});
+		// a handler that never settles, so the ACK is never sent
+		server.on("foo", () => new Promise(() => {}));
+		const client = await createConnectedClient("ws://localhost:12345");
+		const pending = client.send({"@type": "foo"});
+		// let the message reach the server, then close the session underneath the client
+		await sleep(20);
+		server.sessions.forEach(session => session.close());
+		try {
+			await pending;
+			expect.fail("Expected error");
+		}
+		catch (error) {
+			if (!(error instanceof VcmpError)) throw new Error("Expected error to be instance of VcmpError");
+			expect(error.status).to.be.equal(503);
+			expect(error.title).to.be.equal("Session closed");
+		}
+		finally {
+			client.stop();
+			await server.stop();
+		}
+	});
+
+	it("rejects pending sends when the ack timeout elapses", async () => {
+		const server = new VcmpServer({
+			port: 12345,
+		});
+		server.on("foo", () => new Promise(() => {}));
+		const client = new VcmpClient("ws://localhost:12345", {
+			autoStart: true,
+			customWebSocket: NodeWebSocket,
+			ackTimeout: 100,
+		});
+		await awaitConnected(client);
+		try {
+			await client.send({"@type": "foo"});
+			expect.fail("Expected error");
+		}
+		catch (error) {
+			if (!(error instanceof VcmpError)) throw new Error("Expected error to be instance of VcmpError");
+			expect(error.status).to.be.equal(504);
+			expect(error.title).to.be.equal("Acknowledgement timeout");
+		}
+		finally {
+			client.stop();
+			await server.stop();
+		}
+	});
+
+	it("rejects sends on a session that is not open", async () => {
+		const server = new VcmpServer({
+			port: 12345,
+		});
+		const client = await createConnectedClient("ws://localhost:12345");
+		const session = server.sessions[0];
+		client.stop();
+		// wait for the close to propagate to the server side
+		await sleep(20);
+		try {
+			await session.send({"@type": "foo"});
+			expect.fail("Expected error");
+		}
+		catch (error) {
+			if (!(error instanceof VcmpError)) throw new Error("Expected error to be instance of VcmpError");
+			expect(error.status).to.be.equal(503);
+			expect(error.title).to.be.equal("Session not open");
+		}
+		finally {
+			await server.stop();
+		}
+	});
 });
 
 async function createConnectedClient(url: string) {
