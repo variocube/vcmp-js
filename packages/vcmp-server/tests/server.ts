@@ -213,9 +213,10 @@ describe("VcmpServer", () => {
 		});
 		const client = await createConnectedClient("ws://localhost:12345");
 		const session = server.sessions[0];
+		// wait for the close to actually propagate to the server side
+		const disconnected = new Promise<void>(resolve => server.onSessionDisconnected = () => resolve());
 		client.stop();
-		// wait for the close to propagate to the server side
-		await sleep(20);
+		await disconnected;
 		try {
 			await session.send({"@type": "foo"});
 			expect.fail("Expected error");

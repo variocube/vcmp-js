@@ -10,19 +10,15 @@ type PromiseCallbacks = {
 	timeout?: number | NodeJS.Timeout;
 };
 
-/**
- * Default timeout for awaiting the acknowledgement of a sent message.
- */
-export const DEFAULT_ACK_TIMEOUT = 30000;
-
 interface VcmpSessionOptions {
 	webSocket: WebSocket | NodeWebSocket;
 	resolver: (type: string) => VcmpHandler<any> | undefined;
 	debug?: ConsoleLike;
 	/**
-	 * Timeout in milliseconds for awaiting the acknowledgement of a sent message.
+	 * Optional timeout in milliseconds for awaiting the acknowledgement of a sent message.
 	 * When it elapses, the promise returned from `send` rejects with a `VcmpError` (status 504).
-	 * Defaults to `DEFAULT_ACK_TIMEOUT`. A value of 0 or below disables the timeout.
+	 * Disabled by default (or with a value of 0 or below): the promise then settles only on
+	 * ACK/NAK or when the session closes — bounding the wait is the caller's decision.
 	 */
 	ackTimeout?: number;
 }
@@ -37,7 +33,7 @@ export class VcmpSession {
 		this.webSocket = webSocket;
 		this.resolver = resolver;
 		this.debug = debug;
-		this.ackTimeout = ackTimeout ?? DEFAULT_ACK_TIMEOUT;
+		this.ackTimeout = ackTimeout ?? 0;
 	}
 
 	private readonly webSocket: WebSocket | NodeWebSocket;
@@ -69,6 +65,10 @@ export class VcmpSession {
 			}
 			const payload = JSON.stringify(message);
 			const id = generateVcmpFrameId();
+			// Send before registering the callbacks entry: if sendFrame throws synchronously,
+			// the executor rejects the promise and no entry or timer is left behind. The ACK
+			// cannot overtake the registration, since it arrives on a later event-loop turn.
+			this.sendFrame({type: "MSG", id, payload});
 			const timeout = this.ackTimeout > 0
 				? setTimeout(() =>
 					this.failPendingMessage(
@@ -81,7 +81,6 @@ export class VcmpSession {
 					), this.ackTimeout)
 				: undefined;
 			this.callbacks.set(id, {resolve, reject, timeout});
-			this.sendFrame({type: "MSG", id, payload});
 		});
 	}
 
@@ -100,19 +99,40 @@ export class VcmpSession {
 	private handleAck(frameId: string, payload: string | undefined) {
 		const promise = this.takePendingMessage(frameId);
 		if (promise) {
-			const result = payload ? JSON.parse(payload) : undefined;
-			promise.resolve(result);
+			try {
+				const result = payload ? JSON.parse(payload) : undefined;
+				promise.resolve(result);
+			}
+			catch (error) {
+				promise.reject(
+					new VcmpError({
+						title: "Invalid acknowledgement",
+						status: 500,
+						detail: "The ACK payload could not be parsed.",
+					}),
+				);
+			}
 		}
 	}
 
 	private handleNak(frameId: string, payload: string | undefined) {
 		const promise = this.takePendingMessage(frameId);
 		if (promise) {
-			const error = payload ? createVcmpError(JSON.parse(payload)) : new VcmpError({
-				title: "Message handling failed",
-				status: 500,
-				detail: "Unspecified error in message handling.",
-			});
+			let error: VcmpError;
+			try {
+				error = payload ? createVcmpError(JSON.parse(payload)) : new VcmpError({
+					title: "Message handling failed",
+					status: 500,
+					detail: "Unspecified error in message handling.",
+				});
+			}
+			catch (parseError) {
+				error = new VcmpError({
+					title: "Message handling failed",
+					status: 500,
+					detail: "The NAK payload could not be parsed.",
+				});
+			}
 			promise.reject(error);
 		}
 	}
@@ -260,7 +280,7 @@ export class VcmpSession {
 						this.sendFrame({
 							type: "ACK",
 							id: frameId,
-							payload: result ? JSON.stringify(result) : undefined,
+							payload: result !== undefined ? JSON.stringify(result) : undefined,
 						});
 					}
 					catch (error) {

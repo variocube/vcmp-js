@@ -1,4 +1,5 @@
 import NodeWebSocket from "ws";
+import {VcmpError} from "./error";
 import {VcmpSession} from "./session";
 import {CloseHandler, ConsoleLike, OpenHandler, VcmpHandler, VcmpMessage} from "./types";
 
@@ -8,9 +9,10 @@ export interface Options {
 	customWebSocket?: (typeof NodeWebSocket) | (typeof WebSocket);
 	debug?: ConsoleLike;
 	/**
-	 * Timeout in milliseconds for awaiting the acknowledgement of a sent message.
+	 * Optional timeout in milliseconds for awaiting the acknowledgement of a sent message.
 	 * When it elapses, the promise returned from `send` rejects with a `VcmpError` (status 504).
-	 * Defaults to `DEFAULT_ACK_TIMEOUT`. A value of 0 or below disables the timeout.
+	 * Disabled by default (or with a value of 0 or below): the promise then settles only on
+	 * ACK/NAK or when the session closes — bounding the wait is the caller's decision.
 	 */
 	ackTimeout?: number;
 }
@@ -63,6 +65,9 @@ export class VcmpClient {
 		if (this.reconnectTimeout) {
 			clearTimeout(this.reconnectTimeout as any);
 		}
+		// Reset the flag so a later start() can schedule reconnects again;
+		// otherwise the cleared timer above would never clear it.
+		this.waitingForReconnect = false;
 		if (this.session) {
 			this.debug(`Closing VCMP session`);
 			this.session.close();
@@ -79,7 +84,13 @@ export class VcmpClient {
 			return this.session.send(message);
 		}
 		else {
-			return Promise.reject(new Error("No session."));
+			return Promise.reject(
+				new VcmpError({
+					title: "Session not open",
+					status: 503,
+					detail: "Cannot send message: the client has no session.",
+				}),
+			);
 		}
 	}
 

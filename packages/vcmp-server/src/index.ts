@@ -12,9 +12,10 @@ export type VcmpServerOptions = ServerOptions & {
 	webSocketServer?: WebSocketServer;
 
 	/**
-	 * Timeout in milliseconds for awaiting the acknowledgement of a sent message.
+	 * Optional timeout in milliseconds for awaiting the acknowledgement of a sent message.
 	 * When it elapses, the promise returned from `send` rejects with a `VcmpError` (status 504).
-	 * A value of 0 or below disables the timeout.
+	 * Disabled by default (or with a value of 0 or below): the promise then settles only on
+	 * ACK/NAK or when the session closes — bounding the wait is the caller's decision.
 	 */
 	ackTimeout?: number;
 };
@@ -24,6 +25,7 @@ export type SessionDisconnected = (session: VcmpSession) => any;
 
 export class VcmpServer {
 	readonly #wss: WebSocketServer;
+	readonly #debug?: ConsoleLike;
 
 	readonly #handlers = new Map<string, VcmpHandler<any>>();
 	readonly #sessions = new Set<VcmpSession>();
@@ -40,6 +42,7 @@ export class VcmpServer {
 			...wssOptions
 		} = options || {};
 
+		this.#debug = debug;
 		this.#wss = webSocketServer ?? new WebSocketServer({
 			...wssOptions,
 		});
@@ -90,7 +93,9 @@ export class VcmpServer {
 
 	broadcast<T extends VcmpMessage>(message: T) {
 		for (const session of this.#sessions) {
-			session.send(message);
+			// Fire-and-forget: a session may reject (e.g. closing mid-broadcast); swallow the
+			// rejection so it cannot surface as an unhandled promise rejection in the process.
+			session.send(message).catch(error => this.#debug?.warn("Broadcast send failed", error));
 		}
 	}
 
