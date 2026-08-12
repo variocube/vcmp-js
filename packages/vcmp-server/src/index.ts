@@ -10,14 +10,6 @@ export type VcmpServerOptions = ServerOptions & {
 
 	/** The web socket server. If none is passed, one is constructed from the passed options. */
 	webSocketServer?: WebSocketServer;
-
-	/**
-	 * Optional timeout in milliseconds for awaiting the acknowledgement of a sent message.
-	 * When it elapses, the promise returned from `send` rejects with a `VcmpError` (status 504).
-	 * Disabled by default (or with a value of 0 or below): the promise then settles only on
-	 * ACK/NAK or when the session closes — bounding the wait is the caller's decision.
-	 */
-	ackTimeout?: number;
 };
 
 export type SessionConnected = (session: VcmpSession) => any;
@@ -38,7 +30,6 @@ export class VcmpServer {
 			debug,
 			heartbeatInterval = 20000,
 			webSocketServer,
-			ackTimeout,
 			...wssOptions
 		} = options || {};
 
@@ -51,7 +42,6 @@ export class VcmpServer {
 				webSocket: webSocket,
 				resolver: type => this.#handlers.get(type),
 				debug: options?.debug,
-				ackTimeout,
 			});
 
 			session.onClose = () => {
@@ -93,9 +83,10 @@ export class VcmpServer {
 
 	broadcast<T extends VcmpMessage>(message: T) {
 		for (const session of this.#sessions) {
-			// Fire-and-forget: a session may reject (e.g. closing mid-broadcast); swallow the
-			// rejection so it cannot surface as an unhandled promise rejection in the process.
-			session.send(message).catch(error => this.#debug?.warn("Broadcast send failed", error));
+			// Fire-and-forget: a session may reject (e.g. closing mid-broadcast, or the peer
+			// NAKing the message). Log the rejection even without a configured debug sink —
+			// a silently dropped NAK would be invisible to the caller and the logs alike.
+			session.send(message).catch(error => (this.#debug ?? console).warn("Broadcast send failed", error));
 		}
 	}
 

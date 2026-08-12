@@ -181,32 +181,6 @@ describe("VcmpServer", () => {
 		}
 	});
 
-	it("rejects pending sends when the ack timeout elapses", async () => {
-		const server = new VcmpServer({
-			port: 12345,
-		});
-		server.on("foo", () => new Promise(() => {}));
-		const client = new VcmpClient("ws://localhost:12345", {
-			autoStart: true,
-			customWebSocket: NodeWebSocket,
-			ackTimeout: 100,
-		});
-		await awaitConnected(client);
-		try {
-			await client.send({"@type": "foo"});
-			expect.fail("Expected error");
-		}
-		catch (error) {
-			if (!(error instanceof VcmpError)) throw new Error("Expected error to be instance of VcmpError");
-			expect(error.status).to.be.equal(504);
-			expect(error.title).to.be.equal("Acknowledgement timeout");
-		}
-		finally {
-			client.stop();
-			await server.stop();
-		}
-	});
-
 	it("rejects sends on a session that is not open", async () => {
 		const server = new VcmpServer({
 			port: 12345,

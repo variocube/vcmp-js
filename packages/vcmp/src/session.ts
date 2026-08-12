@@ -7,24 +7,16 @@ import {CloseHandler, ConsoleLike, OpenHandler, VcmpHandler, VcmpMessage} from "
 type PromiseCallbacks = {
 	resolve: (result?: any) => void;
 	reject: (reason?: any) => void;
-	timeout?: number | NodeJS.Timeout;
 };
 
 interface VcmpSessionOptions {
 	webSocket: WebSocket | NodeWebSocket;
 	resolver: (type: string) => VcmpHandler<any> | undefined;
 	debug?: ConsoleLike;
-	/**
-	 * Optional timeout in milliseconds for awaiting the acknowledgement of a sent message.
-	 * When it elapses, the promise returned from `send` rejects with a `VcmpError` (status 504).
-	 * Disabled by default (or with a value of 0 or below): the promise then settles only on
-	 * ACK/NAK or when the session closes — bounding the wait is the caller's decision.
-	 */
-	ackTimeout?: number;
 }
 
 export class VcmpSession {
-	constructor({webSocket, resolver, debug, ackTimeout}: VcmpSessionOptions) {
+	constructor({webSocket, resolver, debug}: VcmpSessionOptions) {
 		webSocket.onmessage = this.handleMessage;
 		webSocket.onerror = this.handleError;
 		webSocket.onopen = this.handleOpen;
@@ -33,13 +25,11 @@ export class VcmpSession {
 		this.webSocket = webSocket;
 		this.resolver = resolver;
 		this.debug = debug;
-		this.ackTimeout = ackTimeout ?? 0;
 	}
 
 	private readonly webSocket: WebSocket | NodeWebSocket;
 	private readonly resolver: (type: string) => VcmpHandler<any> | undefined;
 	private readonly debug?: ConsoleLike;
-	private readonly ackTimeout: number;
 
 	public onOpen?: OpenHandler;
 	public onClose?: CloseHandler;
@@ -65,22 +55,16 @@ export class VcmpSession {
 			}
 			const payload = JSON.stringify(message);
 			const id = generateVcmpFrameId();
-			// Send before registering the callbacks entry: if sendFrame throws synchronously,
-			// the executor rejects the promise and no entry or timer is left behind. The ACK
-			// cannot overtake the registration, since it arrives on a later event-loop turn.
-			this.sendFrame({type: "MSG", id, payload});
-			const timeout = this.ackTimeout > 0
-				? setTimeout(() =>
-					this.failPendingMessage(
-						id,
-						new VcmpError({
-							title: "Acknowledgement timeout",
-							status: 504,
-							detail: `The message was not acknowledged within ${this.ackTimeout} ms.`,
-						}),
-					), this.ackTimeout)
-				: undefined;
-			this.callbacks.set(id, {resolve, reject, timeout});
+			// Register before sending: a synchronously-delivering WebSocket (in-memory pairs,
+			// test doubles passed via customWebSocket) can deliver the ACK during sendFrame.
+			this.callbacks.set(id, {resolve, reject});
+			try {
+				this.sendFrame({type: "MSG", id, payload});
+			}
+			catch (error) {
+				this.callbacks.delete(id);
+				throw error;
+			}
 		});
 	}
 
@@ -93,7 +77,7 @@ export class VcmpSession {
 	}
 
 	initiateHeartbeat(heartbeatInterval: number) {
-		this.sendFrame({type: "HBT", heartbeatInterval});
+		this.sendHeartbeat({type: "HBT", heartbeatInterval});
 	}
 
 	private handleAck(frameId: string, payload: string | undefined) {
@@ -104,11 +88,13 @@ export class VcmpSession {
 				promise.resolve(result);
 			}
 			catch (error) {
+				this.debug?.warn("Could not parse ACK payload", payload, error);
 				promise.reject(
 					new VcmpError({
 						title: "Invalid acknowledgement",
 						status: 500,
 						detail: "The ACK payload could not be parsed.",
+						cause: error,
 					}),
 				);
 			}
@@ -127,10 +113,12 @@ export class VcmpSession {
 				});
 			}
 			catch (parseError) {
+				this.debug?.warn("Could not parse NAK payload", payload, parseError);
 				error = new VcmpError({
 					title: "Message handling failed",
 					status: 500,
 					detail: "The NAK payload could not be parsed.",
+					cause: parseError,
 				});
 			}
 			promise.reject(error);
@@ -138,16 +126,13 @@ export class VcmpSession {
 	}
 
 	/**
-	 * Removes and returns the promise callbacks of a pending message, clearing its ack timeout.
+	 * Removes and returns the promise callbacks of a pending message.
 	 * Returns undefined if the message is not pending (already settled or unknown).
 	 */
 	private takePendingMessage(frameId: string) {
 		const promise = this.callbacks.get(frameId);
 		if (promise) {
 			this.callbacks.delete(frameId);
-			if (promise.timeout) {
-				clearTimeout(promise.timeout as any);
-			}
 		}
 		return promise;
 	}
@@ -171,6 +156,19 @@ export class VcmpSession {
 			const serializedFrame = serializeVcmpFrame(frame);
 			this.debug?.debug("Sending frame", serializedFrame);
 			this.webSocket.send(serializedFrame);
+		}
+	}
+
+	/**
+	 * Sends a frame on a best-effort basis from the inbound message path,
+	 * where a send failure must not propagate into the WebSocket's message event.
+	 */
+	private trySendFrame(frame: VcmpFrame) {
+		try {
+			this.sendFrame(frame);
+		}
+		catch (error) {
+			this.debug?.warn("Could not send frame", frame.type, error);
 		}
 	}
 
@@ -212,7 +210,16 @@ export class VcmpSession {
 	private handleMessage = (event: MessageEvent | NodeWebSocket.MessageEvent) => {
 		if (typeof event.data == "string") {
 			this.debug?.debug("Received frame", event.data);
-			const frame = parseVcmpFrame(event.data);
+			let frame: ReturnType<typeof parseVcmpFrame>;
+			try {
+				frame = parseVcmpFrame(event.data);
+			}
+			catch (error) {
+				// A throw from the message event would be an uncaught exception under Node's
+				// `ws` and could take the whole process down. Log and drop the frame instead.
+				this.debug?.warn("Ignoring invalid frame", event.data, error);
+				return;
+			}
 			this.debug?.debug("Parsed frame", frame);
 			switch (frame.type) {
 				case "HBT":
@@ -234,6 +241,24 @@ export class VcmpSession {
 		}
 	};
 
+	private sendHeartbeat(frame: VcmpHeartbeatFrame) {
+		this.debug?.debug("Sending heartbeat.");
+
+		// set the flag that we await a heartbeat
+		this.awaitingHeartbeat = true;
+
+		// Arm the watchdog before sending: if the peer never sends a heartbeat back
+		// within 2 x interval, the connection is considered dead and closed. This also
+		// covers a peer that connects but never answers the initial heartbeat at all.
+		clearTimeout(this.heartbeatReceiveTimeout as any);
+		this.heartbeatReceiveTimeout = setTimeout(() => {
+			this.debug?.warn("Did not receive heartbeat in time. Closing session.");
+			this.close();
+		}, 2 * frame.heartbeatInterval);
+
+		this.trySendFrame(frame);
+	}
+
 	private handleHeartbeatReceived(frame: VcmpHeartbeatFrame) {
 		// check whether we are currently awaiting a heartbeat
 		if (this.awaitingHeartbeat) {
@@ -242,26 +267,11 @@ export class VcmpSession {
 
 			this.debug?.debug("Received heartbeat.");
 
-			// clear previous heartbeat receive timeout
+			// clear the heartbeat receive timeout
 			clearTimeout(this.heartbeatReceiveTimeout as any);
 
 			// send heartbeat after the interval passes
-			this.heartbeatTimeout = setTimeout(() => {
-				this.debug?.debug("Sending heartbeat.");
-
-				// send the heartbeat
-				this.sendFrame(frame);
-
-				// set the flag that we await a heartbeat
-				this.awaitingHeartbeat = true;
-
-				// set up a new heartbeat receive timeout, that closes the session
-				// if we don't receive a heartbeat back within 2 x interval
-				this.heartbeatReceiveTimeout = setTimeout(() => {
-					this.debug?.warn("Did not receive heartbeat in time. Closing session.");
-					this.close();
-				}, 2 * frame.heartbeatInterval);
-			}, frame.heartbeatInterval);
+			this.heartbeatTimeout = setTimeout(() => this.sendHeartbeat(frame), frame.heartbeatInterval);
 		}
 		else {
 			this.debug?.warn("Ignoring unexpected heartbeat.");
@@ -269,7 +279,26 @@ export class VcmpSession {
 	}
 
 	private handleVcmpMessage(frameId: string, payload: string | undefined) {
-		const message = payload ? JSON.parse(payload) : {} as any;
+		let message: any;
+		try {
+			message = payload ? JSON.parse(payload) : {};
+		}
+		catch (error) {
+			// NAK the frame so the peer's send() settles instead of pending forever.
+			this.debug?.warn("Could not parse message payload, sending NAK", payload, error);
+			this.trySendFrame({
+				type: "NAK",
+				id: frameId,
+				payload: JSON.stringify(
+					new VcmpError({
+						title: "Invalid message",
+						status: 400,
+						detail: "The message payload could not be parsed.",
+					}),
+				),
+			});
+			return;
+		}
 		const type = message["@type"];
 		if (type) {
 			const handler = this.resolver(type);
@@ -277,7 +306,7 @@ export class VcmpSession {
 				asyncExecute(async () => {
 					try {
 						const result = await handler(message, this);
-						this.sendFrame({
+						this.trySendFrame({
 							type: "ACK",
 							id: frameId,
 							payload: result !== undefined ? JSON.stringify(result) : undefined,
@@ -285,17 +314,32 @@ export class VcmpSession {
 					}
 					catch (error) {
 						this.debug?.warn("Error in handler, sending NAK", error);
-						this.sendFrame({type: "NAK", id: frameId, payload: JSON.stringify(createVcmpError(error))});
+						this.trySendFrame({
+							type: "NAK",
+							id: frameId,
+							payload: JSON.stringify(createVcmpError(error)),
+						});
 					}
 				});
 			}
 			else {
 				this.debug?.warn("No handler found for message, sending NAK", message);
-				this.sendFrame({type: "NAK", id: frameId});
+				this.trySendFrame({type: "NAK", id: frameId});
 			}
 		}
 		else {
-			this.debug?.error("Could not determine type of message", message);
+			this.debug?.error("Could not determine type of message, sending NAK", message);
+			this.trySendFrame({
+				type: "NAK",
+				id: frameId,
+				payload: JSON.stringify(
+					new VcmpError({
+						title: "Invalid message",
+						status: 400,
+						detail: "The message does not specify a type.",
+					}),
+				),
+			});
 		}
 	}
 }

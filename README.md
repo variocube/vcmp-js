@@ -56,18 +56,23 @@ message handler has completed:
 - It **resolves** with the handler's result when the peer sends an ACK.
 - It **rejects** with a `VcmpError` when:
   - the peer's handler fails (NAK, carrying the peer's `ProblemDetail`),
-  - the underlying WebSocket is not open at the time of sending (status 503, "Session not open"),
-  - the session closes before the ACK arrives (status 503, "Session closed"), or
-  - the optional ack timeout elapses first (status 504, "Acknowledgement timeout").
+  - the underlying WebSocket is not open at the time of sending (status 503, "Session not open"), or
+  - the session closes before the ACK arrives (status 503, "Session closed").
 
-The ack timeout is **disabled by default**: how long to wait for a live-but-unresponsive peer is
-the caller's decision. Opt in via the `ackTimeout` option (milliseconds) of `VcmpClient` and
-`VcmpServer` to bound every send of that instance, or race an individual send against your own
-timer. With the timeout disabled, a send on a healthy, open session whose peer never acknowledges
-stays pending until the session closes (a dead connection is detected by the heartbeat and closed).
+There is deliberately **no library-level acknowledgement timeout**: different operations have
+vastly different legitimate durations (the ACK is only sent after the peer's handler completes),
+so bounding the wait is the caller's decision — race an individual send against your own timer
+where a bound is needed. The same policy applies in the Java implementation (vcmp-spring), where
+`VcmpCallback.await(...)` serves that purpose.
 
-Note that a `VcmpError` rejection no longer implies the peer answered: 503/504 describe local
-transport conditions, while a NAK carries the peer's own status. A rejection other than a NAK also
+A send on an open session whose peer never acknowledges stays pending until the session closes.
+A dead connection is detected by the heartbeat and closed — provided the heartbeat is running:
+`VcmpServer` initiates it automatically on every connection (`heartbeatInterval`, default 20 s),
+and both sides then watchdog it. A standalone `VcmpSession` only has this protection once
+`initiateHeartbeat` is called (or the peer initiates).
+
+Note that a `VcmpError` rejection no longer implies the peer answered: 503 describes a local
+transport condition, while a NAK carries the peer's own status. A rejection other than a NAK also
 does not imply the peer ignored the message: an ACK lost to a connection loss still means the
 handler ran. Use an idempotent retry if the operation must be applied exactly once.
 

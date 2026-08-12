@@ -8,13 +8,6 @@ export interface Options {
 	autoStart: boolean;
 	customWebSocket?: (typeof NodeWebSocket) | (typeof WebSocket);
 	debug?: ConsoleLike;
-	/**
-	 * Optional timeout in milliseconds for awaiting the acknowledgement of a sent message.
-	 * When it elapses, the promise returned from `send` rejects with a `VcmpError` (status 504).
-	 * Disabled by default (or with a value of 0 or below): the promise then settles only on
-	 * ACK/NAK or when the session closes — bounding the wait is the caller's decision.
-	 */
-	ackTimeout?: number;
 }
 
 const defaultOptions: Options = {
@@ -68,9 +61,14 @@ export class VcmpClient {
 		// Reset the flag so a later start() can schedule reconnects again;
 		// otherwise the cleared timer above would never clear it.
 		this.waitingForReconnect = false;
-		if (this.session) {
+		const session = this.session;
+		if (session) {
 			this.debug(`Closing VCMP session`);
-			this.session.close();
+			// Detach the reconnect logic before closing: the socket's close event arrives
+			// asynchronously, and must not discard a session created by a later start().
+			this.session = undefined;
+			session.onClose = () => this.onClose && this.onClose();
+			session.close();
 		}
 	}
 
@@ -112,7 +110,6 @@ export class VcmpClient {
 				webSocket,
 				resolver: type => this.handler.get(type),
 				debug: this.options.debug,
-				ackTimeout: this.options.ackTimeout,
 			});
 			this.session.onOpen = this.handleOpen;
 			this.session.onClose = this.handleClose;
