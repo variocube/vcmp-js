@@ -68,8 +68,12 @@ where a bound is needed. The same policy applies in the Java implementation (vcm
 A send on an open session whose peer never acknowledges stays pending until the session closes.
 A dead connection is detected by the heartbeat and closed — provided the heartbeat is running:
 `VcmpServer` initiates it automatically on every connection (`heartbeatInterval`, default 20 s),
-and both sides then watchdog it. A standalone `VcmpSession` only has this protection once
-`initiateHeartbeat` is called (or the peer initiates).
+and both sides then watchdog it. `VcmpClient` additionally expects the server to initiate a
+heartbeat within `initialHeartbeatTimeout` (default 60 s, a value of 0 or below disables it) of
+the connection opening and closes the session otherwise — so a half-open connection through which
+no heartbeat ever arrives cannot leave sends pending indefinitely. A standalone `VcmpSession` only
+has this protection once `initiateHeartbeat` is called (or the peer initiates and `expectHeartbeat`
+bounds the wait for it).
 
 Note that a `VcmpError` rejection no longer implies the peer answered: 503 describes a local
 transport condition, while a NAK carries the peer's own status. A rejection other than a NAK also

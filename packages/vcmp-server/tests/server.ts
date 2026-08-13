@@ -27,13 +27,13 @@ describe("VcmpServer", () => {
 			messageCount++;
 		});
 
-		server.broadcast({
+		const results = await server.broadcast({
 			"@type": "foo",
 			foo: "bar",
 		});
 
-		await sleep(20);
-
+		expect(results).to.have.length(2);
+		expect(results.filter(entry => entry.error)).to.have.length(0);
 		expect(messageCount).to.be.equal(2);
 
 		client1.stop();

@@ -37,6 +37,7 @@ export class VcmpSession {
 	private heartbeatTimeout?: number | NodeJS.Timeout;
 	private heartbeatReceiveTimeout?: number | NodeJS.Timeout;
 	private awaitingHeartbeat = true;
+	private initiatedHeartbeatInterval?: number;
 
 	private callbacks = new Map<string, PromiseCallbacks>();
 
@@ -83,7 +84,26 @@ export class VcmpSession {
 	}
 
 	initiateHeartbeat(heartbeatInterval: number) {
-		this.sendHeartbeat({type: "HBT", heartbeatInterval});
+		this.initiatedHeartbeatInterval = heartbeatInterval;
+		if (this.isOpen) {
+			this.sendHeartbeat({type: "HBT", heartbeatInterval});
+		}
+		// otherwise the heartbeat starts once the socket opens (see handleOpen) —
+		// initiating on a still-CONNECTING socket must not silently disable it
+	}
+
+	/**
+	 * Expects the peer to send a heartbeat within the given time, closing the session
+	 * otherwise. Meant for the non-initiating side, whose watchdog otherwise only starts
+	 * with the first received heartbeat — without this, a peer that completes the
+	 * handshake but never sends anything would go undetected.
+	 */
+	expectHeartbeat(timeoutMs: number) {
+		clearTimeout(this.heartbeatReceiveTimeout as any);
+		this.heartbeatReceiveTimeout = setTimeout(() => {
+			this.debug?.warn("Did not receive the expected heartbeat. Closing session.");
+			this.close();
+		}, timeoutMs);
 	}
 
 	private handleAck(frameId: string, payload: string | undefined) {
@@ -181,6 +201,10 @@ export class VcmpSession {
 	private handleOpen = () => {
 		this.debug?.debug("WebSocket session open");
 		this.awaitingHeartbeat = true;
+		// start a heartbeat that was initiated while the socket was still connecting
+		if (this.initiatedHeartbeatInterval) {
+			this.sendHeartbeat({type: "HBT", heartbeatInterval: this.initiatedHeartbeatInterval});
+		}
 		this.onOpen && this.onOpen();
 	};
 
@@ -283,6 +307,13 @@ export class VcmpSession {
 	}
 
 	private handleHeartbeatReceived(frame: VcmpHeartbeatFrame) {
+		// Guard against a malformed HBT frame: a missing or garbled interval parses to
+		// NaN, and NaN timeouts coerce to 0 — which would echo "HBTNaN" and let the
+		// watchdog close the session within the same tick.
+		if (!Number.isFinite(frame.heartbeatInterval) || frame.heartbeatInterval <= 0) {
+			this.debug?.warn("Ignoring heartbeat with invalid interval", frame.heartbeatInterval);
+			return;
+		}
 		// check whether we are currently awaiting a heartbeat
 		if (this.awaitingHeartbeat) {
 			// clear the flag that we are awaiting a heartbeat

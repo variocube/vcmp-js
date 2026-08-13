@@ -190,15 +190,50 @@ describe("VcmpSession", () => {
 		session.close();
 	});
 
-	it("does not arm the watchdog when the heartbeat cannot be sent", async () => {
+	it("defers an initiated heartbeat until the socket opens", async () => {
 		const webSocket = new FakeWebSocket();
 		webSocket.readyState = 0; // CONNECTING
 		const session = createSession(webSocket);
 		session.initiateHeartbeat(10);
 		await sleep(50);
-		// no heartbeat was sent, and no watchdog closed the (healthy) connection
+		// nothing is sent and no watchdog closes the (healthy) connection while the
+		// socket is still connecting
 		expect(webSocket.sent).to.have.length(0);
 		expect(webSocket.readyState).to.be.equal(0);
+		// once the socket opens, the heartbeat starts — and its watchdog closes the
+		// session when the peer never answers
+		webSocket.readyState = 1;
+		webSocket.onopen?.();
+		expect(webSocket.sent).to.deep.equal(["HBT10"]);
+		await waitFor(() => webSocket.readyState === 3);
+	});
+
+	it("ignores a heartbeat with an invalid interval", async () => {
+		const webSocket = new FakeWebSocket();
+		createSession(webSocket);
+		webSocket.receive("HBT");
+		webSocket.receive("HBTfoo");
+		await sleep(30);
+		// no HBTNaN echo, and no watchdog closed the session
+		expect(webSocket.sent).to.have.length(0);
+		expect(webSocket.readyState).to.be.equal(1);
+	});
+
+	it("closes the session when an expected heartbeat never arrives", async () => {
+		const webSocket = new FakeWebSocket();
+		const session = createSession(webSocket);
+		session.expectHeartbeat(10);
+		await waitFor(() => webSocket.readyState === 3);
+	});
+
+	it("keeps the session open when the expected heartbeat arrives", async () => {
+		const webSocket = new FakeWebSocket();
+		const session = createSession(webSocket);
+		session.expectHeartbeat(50);
+		webSocket.receive("HBT1000");
+		await sleep(100);
+		expect(webSocket.readyState).to.be.equal(1);
+		session.close();
 	});
 
 	it("NAKs with a fallback when the handler error cannot be serialized", async () => {

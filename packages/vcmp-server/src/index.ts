@@ -81,13 +81,25 @@ export class VcmpServer {
 		this.#handlers.delete(messageType);
 	}
 
+	/**
+	 * Broadcasts a message to every connected session.
+	 *
+	 * Returns a promise that always resolves (never rejects) with one entry per session,
+	 * carrying either the session's ACK `result` or its `error` (e.g. a NAK, or the
+	 * session closing mid-broadcast) — so callers can observe per-session failures.
+	 * Ignoring the returned promise is safe: rejections are handled internally and
+	 * reported via the debug sink.
+	 */
 	broadcast<T extends VcmpMessage>(message: T) {
-		for (const session of this.#sessions) {
-			// Fire-and-forget: a session may reject (e.g. closing mid-broadcast, or the peer
-			// NAKing the message). Log the rejection even without a configured debug sink —
-			// a silently dropped NAK would be invisible to the caller and the logs alike.
-			session.send(message).catch(error => (this.#debug ?? console).warn("Broadcast send failed", error));
-		}
+		return Promise.all([...this.#sessions].map(session =>
+			session.send(message).then(
+				result => ({session, result, error: undefined}),
+				error => {
+					this.#debug?.warn("Broadcast send failed", error);
+					return {session, result: undefined, error};
+				},
+			)
+		));
 	}
 
 	get sessions() {

@@ -94,6 +94,21 @@ describe("VcmpClient", () => {
 		client.stop();
 	});
 
+	it("closes the session when the server never initiates a heartbeat", async () => {
+		ControlledWebSocket.instances = [];
+		const client = new VcmpClient("ws://test", {
+			customWebSocket: ControlledWebSocket as any,
+			initialHeartbeatTimeout: 20,
+		});
+		client.start();
+		const socket = ControlledWebSocket.instances[0];
+		socket.open();
+		expect(client.connected).to.be.true;
+		await new Promise<void>(resolve => setTimeout(resolve, 80));
+		expect(client.connected).to.be.false;
+		client.stop();
+	});
+
 	it("cancels a pending reconnect when start() is called", async () => {
 		ControlledWebSocket.instances = [];
 		const client = new VcmpClient("ws://test", {

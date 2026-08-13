@@ -6,6 +6,14 @@ import {CloseHandler, ConsoleLike, OpenHandler, VcmpHandler, VcmpMessage} from "
 export interface Options {
 	reconnectTimeout: number;
 	autoStart: boolean;
+	/**
+	 * Time in milliseconds within which the server must initiate a heartbeat after the
+	 * connection opens; the session is closed (and reconnected) otherwise. This guards
+	 * against a half-open connection through which no heartbeat ever arrives — without
+	 * a running heartbeat, nothing would settle pending sends when the connection dies.
+	 * A value of 0 or below disables the expectation. Default: 60000.
+	 */
+	initialHeartbeatTimeout: number;
 	customWebSocket?: (typeof NodeWebSocket) | (typeof WebSocket);
 	debug?: ConsoleLike;
 }
@@ -13,6 +21,7 @@ export interface Options {
 const defaultOptions: Options = {
 	reconnectTimeout: 10000,
 	autoStart: false,
+	initialHeartbeatTimeout: 60000,
 };
 
 export class VcmpClient {
@@ -52,7 +61,7 @@ export class VcmpClient {
 		// both with a fresh connection. Otherwise a still-armed reconnect timer would fire
 		// later and open a second, duplicate connection.
 		this.cancelReconnect();
-		this.discardSession();
+		this.discardSession(true);
 		this.running = true;
 		this.initiateConnection();
 	}
@@ -61,7 +70,7 @@ export class VcmpClient {
 		this.debug(`Stopping VcmpClient for URL: ${this.url}`);
 		this.running = false;
 		this.cancelReconnect();
-		this.discardSession();
+		this.discardSession(false);
 	}
 
 	private cancelReconnect() {
@@ -73,17 +82,18 @@ export class VcmpClient {
 		this.waitingForReconnect = false;
 	}
 
-	private discardSession() {
+	private discardSession(replacing: boolean) {
 		const session = this.session;
 		if (session) {
 			this.debug(`Closing VCMP session`);
-			// Detach the reconnect logic before closing: the socket's close event arrives
-			// asynchronously, and must not discard a session created by a later start().
+			// Detach the handlers before closing: the socket's events arrive asynchronously,
+			// and must not affect a session created by a later start() — neither by firing
+			// the application's onOpen/onClose nor by scheduling a reconnect.
 			this.session = undefined;
-			session.onClose = () => {
-				// Only notify if no new session has been created since: a late close event
-				// of the old socket must not signal "closed" to an application that has
-				// already moved on to a new session.
+			session.onOpen = undefined;
+			// When a replacement follows (start()), suppress the close notification
+			// entirely; otherwise (stop()) notify unless a new session appeared since.
+			session.onClose = replacing ? undefined : () => {
 				if (!this.session) {
 					this.onClose && this.onClose();
 				}
@@ -131,9 +141,9 @@ export class VcmpClient {
 				debug: this.options.debug,
 			});
 			this.session = session;
-			session.onOpen = this.handleOpen;
-			// Capture the session: a close event may arrive after this session has been
+			// Capture the session: an event may arrive after this session has been
 			// replaced, and must not affect the session that replaced it.
+			session.onOpen = () => this.handleSessionOpen(session);
 			session.onClose = () => this.handleSessionClose(session);
 		}
 		else {
@@ -162,10 +172,19 @@ export class VcmpClient {
 		}
 	}
 
-	private handleOpen = () => {
+	private handleSessionOpen(session: VcmpSession) {
+		if (this.session !== session) {
+			this.debug("Ignoring open event of a replaced session");
+			return;
+		}
 		this.debug("VCMP session open");
+		// The server initiates the heartbeat; expect it to arrive, so that a half-open
+		// connection through which no heartbeat ever comes is detected and closed.
+		if (this.options.initialHeartbeatTimeout > 0) {
+			session.expectHeartbeat(this.options.initialHeartbeatTimeout);
+		}
 		this.onOpen && this.onOpen();
-	};
+	}
 
 	private handleSessionClose(session: VcmpSession) {
 		if (this.session !== session) {
