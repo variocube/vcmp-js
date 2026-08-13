@@ -94,6 +94,29 @@ describe("VcmpClient", () => {
 		client.stop();
 	});
 
+	it("cancels a pending reconnect when start() is called", async () => {
+		ControlledWebSocket.instances = [];
+		const client = new VcmpClient("ws://test", {
+			customWebSocket: ControlledWebSocket as any,
+			reconnectTimeout: 30,
+		});
+		client.start();
+		const first = ControlledWebSocket.instances[0];
+		first.open();
+		// the connection drops: a reconnect is scheduled...
+		first.fireClose();
+		// ...but the app reconnects right away instead of waiting for the timer
+		client.start();
+		const second = ControlledWebSocket.instances[1];
+		second.open();
+		expect(client.connected).to.be.true;
+		// the previously scheduled reconnect must not open a third, duplicate connection
+		await new Promise<void>(resolve => setTimeout(resolve, 100));
+		expect(ControlledWebSocket.instances).to.have.length(2);
+		expect(client.connected).to.be.true;
+		client.stop();
+	});
+
 	it("writes to debug object", async () => {
 		let messageCount = 0;
 		const incMessageCount = () => messageCount++;

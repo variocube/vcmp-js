@@ -48,6 +48,11 @@ export class VcmpClient {
 
 	start() {
 		this.debug(`Starting VcmpClient for URL: ${this.url}`);
+		// Cancel a pending reconnect and discard an existing session: this call replaces
+		// both with a fresh connection. Otherwise a still-armed reconnect timer would fire
+		// later and open a second, duplicate connection.
+		this.cancelReconnect();
+		this.discardSession();
 		this.running = true;
 		this.initiateConnection();
 	}
@@ -55,19 +60,34 @@ export class VcmpClient {
 	stop() {
 		this.debug(`Stopping VcmpClient for URL: ${this.url}`);
 		this.running = false;
+		this.cancelReconnect();
+		this.discardSession();
+	}
+
+	private cancelReconnect() {
 		if (this.reconnectTimeout) {
 			clearTimeout(this.reconnectTimeout as any);
 		}
-		// Reset the flag so a later start() can schedule reconnects again;
+		// Reset the flag so a later disconnect can schedule reconnects again;
 		// otherwise the cleared timer above would never clear it.
 		this.waitingForReconnect = false;
+	}
+
+	private discardSession() {
 		const session = this.session;
 		if (session) {
 			this.debug(`Closing VCMP session`);
 			// Detach the reconnect logic before closing: the socket's close event arrives
 			// asynchronously, and must not discard a session created by a later start().
 			this.session = undefined;
-			session.onClose = () => this.onClose && this.onClose();
+			session.onClose = () => {
+				// Only notify if no new session has been created since: a late close event
+				// of the old socket must not signal "closed" to an application that has
+				// already moved on to a new session.
+				if (!this.session) {
+					this.onClose && this.onClose();
+				}
+			};
 			session.close();
 		}
 	}
@@ -93,7 +113,6 @@ export class VcmpClient {
 	}
 
 	private initiateConnection = () => {
-		this.debug("Initiating connection");
 		if (this.running) {
 			this.debug("Initiating connection");
 			const webSocketConstructor = this.options.customWebSocket || WebSocket;
@@ -106,16 +125,19 @@ export class VcmpClient {
 			this.debug("Constructing websocket");
 			const webSocket = new webSocketConstructor(this.url);
 			this.debug("Connecting handlers");
-			this.session = new VcmpSession({
+			const session = new VcmpSession({
 				webSocket,
 				resolver: type => this.handler.get(type),
 				debug: this.options.debug,
 			});
-			this.session.onOpen = this.handleOpen;
-			this.session.onClose = this.handleClose;
+			this.session = session;
+			session.onOpen = this.handleOpen;
+			// Capture the session: a close event may arrive after this session has been
+			// replaced, and must not affect the session that replaced it.
+			session.onClose = () => this.handleSessionClose(session);
 		}
 		else {
-			this.debug("Already running, ignoring call to initiateConnection");
+			this.debug("Not running, ignoring call to initiateConnection");
 		}
 	};
 
@@ -145,11 +167,15 @@ export class VcmpClient {
 		this.onOpen && this.onOpen();
 	};
 
-	private handleClose = () => {
+	private handleSessionClose(session: VcmpSession) {
+		if (this.session !== session) {
+			this.debug("Ignoring close event of a replaced session");
+			return;
+		}
 		this.debug("VCMP session closed");
 		this.onClose && this.onClose();
 		this.scheduleReconnect();
-	};
+	}
 
 	private info(...data: any[]) {
 		this.options.debug?.info(...data);

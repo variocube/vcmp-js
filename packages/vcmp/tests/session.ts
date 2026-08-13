@@ -45,6 +45,16 @@ function sleep(timeoutMs: number) {
 	return new Promise<void>(resolve => setTimeout(resolve, timeoutMs));
 }
 
+async function waitFor(condition: () => boolean, timeoutMs = 2000) {
+	const start = Date.now();
+	while (!condition()) {
+		if (Date.now() - start > timeoutMs) {
+			throw new Error("Timed out waiting for condition");
+		}
+		await sleep(5);
+	}
+}
+
 describe("VcmpSession", () => {
 	it("rejects pending sends when the session closes", async () => {
 		const webSocket = new FakeWebSocket();
@@ -84,7 +94,7 @@ describe("VcmpSession", () => {
 		expect(result).to.be.equal("pong");
 	});
 
-	it("rejects with the thrown error when the socket's send throws synchronously", async () => {
+	it("rejects with a VcmpError when the socket's send throws synchronously", async () => {
 		const webSocket = new FakeWebSocket();
 		webSocket.send = () => {
 			throw new Error("boom");
@@ -95,7 +105,10 @@ describe("VcmpSession", () => {
 			expect.fail("Expected error");
 		}
 		catch (error) {
-			expect((error as Error).message).to.be.equal("boom");
+			if (!(error instanceof VcmpError)) throw new Error("Expected error to be instance of VcmpError");
+			expect(error.status).to.be.equal(503);
+			expect(error.title).to.be.equal("Send failed");
+			expect((error.cause as Error).message).to.be.equal("boom");
 		}
 	});
 
@@ -170,11 +183,35 @@ describe("VcmpSession", () => {
 		const session = createSession(webSocket);
 		session.initiateHeartbeat(100);
 		webSocket.receive("HBT100");
-		await sleep(150);
-		// after the interval, the next heartbeat went out and its watchdog (200 ms) is
-		// still pending — the session must not have been closed
-		expect(webSocket.sent.filter(frame => frame.startsWith("HBT"))).to.have.length(2);
+		// after the interval, the next heartbeat goes out; its own watchdog (200 ms from
+		// the send we are polling for) is still pending — the session must still be open
+		await waitFor(() => webSocket.sent.filter(frame => frame.startsWith("HBT")).length >= 2);
 		expect(webSocket.readyState).to.be.equal(1);
 		session.close();
+	});
+
+	it("does not arm the watchdog when the heartbeat cannot be sent", async () => {
+		const webSocket = new FakeWebSocket();
+		webSocket.readyState = 0; // CONNECTING
+		const session = createSession(webSocket);
+		session.initiateHeartbeat(10);
+		await sleep(50);
+		// no heartbeat was sent, and no watchdog closed the (healthy) connection
+		expect(webSocket.sent).to.have.length(0);
+		expect(webSocket.readyState).to.be.equal(0);
+	});
+
+	it("NAKs with a fallback when the handler error cannot be serialized", async () => {
+		const webSocket = new FakeWebSocket();
+		const circular: any = {title: "foo", status: 400};
+		circular.self = circular;
+		createSession(webSocket, () => () => {
+			throw circular;
+		});
+		webSocket.receive(`MSGabcdefghijkl{"@type":"foo"}`);
+		await waitFor(() => webSocket.sent.length === 1);
+		const nak = webSocket.sent[0];
+		expect(nak.slice(0, 3)).to.be.equal("NAK");
+		expect(JSON.parse(nak.slice(15)).status).to.be.equal(500);
 	});
 });

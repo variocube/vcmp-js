@@ -63,7 +63,13 @@ export class VcmpSession {
 			}
 			catch (error) {
 				this.callbacks.delete(id);
-				throw error;
+				// Wrap so that every rejection of send() is a VcmpError, as documented.
+				throw new VcmpError({
+					title: "Send failed",
+					status: 503,
+					detail: "The message could not be sent.",
+					cause: error,
+				});
 			}
 		});
 	}
@@ -242,21 +248,38 @@ export class VcmpSession {
 	};
 
 	private sendHeartbeat(frame: VcmpHeartbeatFrame) {
+		// Never send or arm the watchdog on a session that is not open — otherwise the
+		// watchdog would close a healthy connection whose heartbeat was never actually
+		// sent. Mirrors the Java implementation (vcmp-spring).
+		if (!this.isOpen) {
+			this.debug?.warn("Not sending heartbeat: the WebSocket is not open.");
+			return;
+		}
+
 		this.debug?.debug("Sending heartbeat.");
 
 		// set the flag that we await a heartbeat
 		this.awaitingHeartbeat = true;
 
-		// Arm the watchdog before sending: if the peer never sends a heartbeat back
-		// within 2 x interval, the connection is considered dead and closed. This also
-		// covers a peer that connects but never answers the initial heartbeat at all.
+		try {
+			this.sendFrame(frame);
+		}
+		catch (error) {
+			// The connection is in an uncertain state — close it, which settles all
+			// pending sends via the close path. Mirrors the Java implementation.
+			this.debug?.warn("Could not send heartbeat. Closing session.", error);
+			this.close();
+			return;
+		}
+
+		// Arm the watchdog after a successful send: if the peer never sends a heartbeat
+		// back within 2 x interval, the connection is considered dead and closed. This
+		// also covers a peer that connects but never answers the initial heartbeat at all.
 		clearTimeout(this.heartbeatReceiveTimeout as any);
 		this.heartbeatReceiveTimeout = setTimeout(() => {
 			this.debug?.warn("Did not receive heartbeat in time. Closing session.");
 			this.close();
 		}, 2 * frame.heartbeatInterval);
-
-		this.trySendFrame(frame);
 	}
 
 	private handleHeartbeatReceived(frame: VcmpHeartbeatFrame) {
@@ -314,11 +337,24 @@ export class VcmpSession {
 					}
 					catch (error) {
 						this.debug?.warn("Error in handler, sending NAK", error);
-						this.trySendFrame({
-							type: "NAK",
-							id: frameId,
-							payload: JSON.stringify(createVcmpError(error)),
-						});
+						// Serializing the handler's error can itself throw (circular
+						// references, BigInt); nothing awaits this callback, so a throw
+						// here would be an unhandled promise rejection.
+						let nakPayload: string;
+						try {
+							nakPayload = JSON.stringify(createVcmpError(error));
+						}
+						catch (serializationError) {
+							this.debug?.warn("Could not serialize handler error", serializationError);
+							nakPayload = JSON.stringify(
+								new VcmpError({
+									title: "Message handling failed",
+									status: 500,
+									detail: "The handler error could not be serialized.",
+								}),
+							);
+						}
+						this.trySendFrame({type: "NAK", id: frameId, payload: nakPayload});
 					}
 				});
 			}
