@@ -1,8 +1,8 @@
-import NodeWebSocket, {MessageEvent} from "ws";
 import {asyncExecute} from "./asyncExecute";
 import {createVcmpError, VcmpError} from "./error";
 import {generateVcmpFrameId, parseVcmpFrame, serializeVcmpFrame, VcmpFrame, VcmpHeartbeatFrame} from "./frame";
 import {CloseHandler, ConsoleLike, OpenHandler, VcmpHandler, VcmpMessage} from "./types";
+import {VcmpCloseEvent, VcmpMessageEvent, VcmpWebSocket} from "./webSocket";
 
 type PromiseCallbacks = {
 	resolve: (result?: any) => void;
@@ -10,7 +10,7 @@ type PromiseCallbacks = {
 };
 
 interface VcmpSessionOptions {
-	webSocket: WebSocket | NodeWebSocket;
+	webSocket: VcmpWebSocket;
 	resolver: (type: string) => VcmpHandler<any> | undefined;
 	debug?: ConsoleLike;
 }
@@ -27,7 +27,7 @@ export class VcmpSession {
 		this.debug = debug;
 	}
 
-	private readonly webSocket: WebSocket | NodeWebSocket;
+	private readonly webSocket: VcmpWebSocket;
 	private readonly resolver: (type: string) => VcmpHandler<any> | undefined;
 	private readonly debug?: ConsoleLike;
 
@@ -208,7 +208,7 @@ export class VcmpSession {
 		this.onOpen && this.onOpen();
 	};
 
-	private handleClose = (event: CloseEvent | NodeWebSocket.CloseEvent) => {
+	private handleClose = (event: VcmpCloseEvent) => {
 		this.debug?.debug("WebSocket session closed", {
 			type: event.type,
 			code: event.code,
@@ -237,7 +237,7 @@ export class VcmpSession {
 		}
 	};
 
-	private handleMessage = (event: MessageEvent | NodeWebSocket.MessageEvent) => {
+	private handleMessage = (event: VcmpMessageEvent) => {
 		if (typeof event.data == "string") {
 			this.debug?.debug("Received frame", event.data);
 			let frame: ReturnType<typeof parseVcmpFrame>;
