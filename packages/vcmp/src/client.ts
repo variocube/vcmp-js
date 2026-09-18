@@ -1,7 +1,7 @@
-import NodeWebSocket from "ws";
 import {VcmpError} from "./error";
 import {VcmpSession} from "./session";
 import {CloseHandler, ConsoleLike, OpenHandler, VcmpHandler, VcmpMessage} from "./types";
+import {VcmpWebSocketConstructor} from "./webSocket";
 
 export interface Options {
 	reconnectTimeout: number;
@@ -14,7 +14,11 @@ export interface Options {
 	 * A value of 0 or below disables the expectation. Default: 60000.
 	 */
 	initialHeartbeatTimeout: number;
-	customWebSocket?: (typeof NodeWebSocket) | (typeof WebSocket);
+	/**
+	 * A WebSocket implementation to use instead of the global `WebSocket`, for example the class
+	 * exported by the `ws` package when running on Node.
+	 */
+	customWebSocket?: VcmpWebSocketConstructor;
 	debug?: ConsoleLike;
 }
 

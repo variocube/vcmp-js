@@ -23,6 +23,18 @@ client.on("hello", ({from}) => console.log(`Received a hello from ${from}.`));
 client.send({"@type": "hello", from: "client"});
 ```
 
+On Node, where there is no global `WebSocket`, pass an implementation via `customWebSocket`:
+
+```typescript
+import WebSocket from "ws";
+
+const client = new VcmpClient("ws://localhost:12345/", {autoStart: true, customWebSocket: WebSocket});
+```
+
+The option is typed structurally (`VcmpWebSocketConstructor`), so the package's declarations do not
+reference `ws` and a browser-only project neither needs `@types/ws` nor inherits Node's globals
+through it.
+
 ### Using the server
 
 Install the package:
