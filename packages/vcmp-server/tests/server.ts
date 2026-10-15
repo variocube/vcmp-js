@@ -1,5 +1,6 @@
 import {isProblemDetail, VcmpClient, VcmpError} from "@variocube/vcmp";
 import {expect} from "chai";
+import {EventEmitter} from "events";
 import NodeWebSocket from "ws";
 import {VcmpServer} from "../src";
 
@@ -179,6 +180,45 @@ describe("VcmpServer", () => {
 			client.stop();
 			await server.stop();
 		}
+	});
+
+	it("reports a session abandoned by its first heartbeat as connected, then disconnected", () => {
+		const webSocketServer = new EventEmitter();
+		const server = new VcmpServer({webSocketServer: webSocketServer as any});
+		const events: string[] = [];
+		server.onSessionConnected = () => events.push("connected");
+		server.onSessionDisconnected = () => events.push("disconnected");
+		// a socket whose send throws, so that the initial heartbeat abandons the session
+		webSocketServer.emit("connection", {
+			readyState: 1,
+			send() {
+				throw new Error("boom");
+			},
+			close() {},
+		});
+		expect(events).to.deep.equal(["connected", "disconnected"]);
+		expect(server.sessions).to.have.length(0);
+	});
+
+	it("starts the heartbeat even when onSessionConnected throws", () => {
+		const webSocketServer = new EventEmitter();
+		const server = new VcmpServer({webSocketServer: webSocketServer as any, heartbeatInterval: 1000});
+		server.onSessionConnected = () => {
+			throw new Error("boom");
+		};
+		const sent: string[] = [];
+		const webSocket = {
+			readyState: 1,
+			onclose: undefined as any,
+			send: (data: string) => sent.push(data),
+			close() {},
+		};
+		// the handler's error still propagates, as before
+		expect(() => webSocketServer.emit("connection", webSocket)).to.throw("boom");
+		expect(sent).to.deep.equal(["HBT1000"]);
+		// deliver the close event, which clears the heartbeat watchdog
+		webSocket.onclose?.({type: "close", code: 1000, reason: ""});
+		expect(server.sessions).to.have.length(0);
 	});
 
 	it("rejects sends on a session that is not open", async () => {

@@ -23,6 +23,13 @@ export interface VcmpWebSocket {
 	send(data: string): void;
 
 	close(): void;
+
+	/**
+	 * Destroys the connection immediately, without the close handshake. Optional: Node's `ws`
+	 * provides it, the DOM `WebSocket` does not. Used to abandon a connection the heartbeat
+	 * considers dead, whose peer would never answer a close handshake.
+	 */
+	terminate?(): void;
 }
 
 /**

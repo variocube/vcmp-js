@@ -38,6 +38,9 @@ export class VcmpSession {
 	private heartbeatReceiveTimeout?: number | NodeJS.Timeout;
 	private awaitingHeartbeat = true;
 	private initiatedHeartbeatInterval?: number;
+	// Set once the session has closed — by the socket's close event or by abandon(). A closed
+	// session ignores all later socket events, so that it closes exactly once.
+	private closed = false;
 
 	private callbacks = new Map<string, PromiseCallbacks>();
 
@@ -80,7 +83,8 @@ export class VcmpSession {
 	}
 
 	get isOpen() {
-		return this.webSocket.readyState == 1; // 1...OPEN
+		// An abandoned socket may still report OPEN until its termination completes
+		return !this.closed && this.webSocket.readyState == 1; // 1...OPEN
 	}
 
 	initiateHeartbeat(heartbeatInterval: number) {
@@ -93,7 +97,7 @@ export class VcmpSession {
 	}
 
 	/**
-	 * Expects the peer to send a heartbeat within the given time, closing the session
+	 * Expects the peer to send a heartbeat within the given time, abandoning the session
 	 * otherwise. Meant for the non-initiating side, whose watchdog otherwise only starts
 	 * with the first received heartbeat — without this, a peer that completes the
 	 * handshake but never sends anything would go undetected.
@@ -101,9 +105,36 @@ export class VcmpSession {
 	expectHeartbeat(timeoutMs: number) {
 		clearTimeout(this.heartbeatReceiveTimeout as any);
 		this.heartbeatReceiveTimeout = setTimeout(() => {
-			this.debug?.warn("Did not receive the expected heartbeat. Closing session.");
-			this.close();
+			this.debug?.warn("Did not receive the expected heartbeat. Abandoning session.");
+			this.abandon("Did not receive the expected heartbeat");
 		}, timeoutMs);
+	}
+
+	/**
+	 * Closes the session immediately when the connection is considered dead, instead of waiting
+	 * for the socket's close event: on a black-holed connection the peer never answers the close
+	 * handshake, and the close event only arrives once TCP gives up (up to ~15 minutes for a
+	 * browser WebSocket) or, with `ws`, once its close timeout (30 s by default) expires.
+	 * The socket is terminated where the implementation supports it (Node's `ws`), and closed
+	 * otherwise; its late close event no longer affects the session.
+	 */
+	private abandon(reason: string) {
+		if (this.closed) {
+			return;
+		}
+		try {
+			if (this.webSocket.terminate) {
+				this.webSocket.terminate();
+			}
+			else {
+				this.webSocket.close();
+			}
+		}
+		catch (error) {
+			this.debug?.warn("Could not tear down the WebSocket", error);
+		}
+		// A no-op if tearing down the socket already delivered its close event synchronously
+		this.handleClose({type: "abandon", code: 1006, reason});
 	}
 
 	private handleAck(frameId: string, payload: string | undefined) {
@@ -199,16 +230,27 @@ export class VcmpSession {
 	}
 
 	private handleOpen = () => {
+		if (this.closed) {
+			return;
+		}
 		this.debug?.debug("WebSocket session open");
 		this.awaitingHeartbeat = true;
 		// start a heartbeat that was initiated while the socket was still connecting
 		if (this.initiatedHeartbeatInterval) {
 			this.sendHeartbeat({type: "HBT", heartbeatInterval: this.initiatedHeartbeatInterval});
 		}
-		this.onOpen && this.onOpen();
+		// a failing first heartbeat has already abandoned the session and raised onClose
+		if (!this.closed) {
+			this.onOpen && this.onOpen();
+		}
 	};
 
 	private handleClose = (event: VcmpCloseEvent) => {
+		if (this.closed) {
+			// the late close event of an abandoned socket
+			return;
+		}
+		this.closed = true;
 		this.debug?.debug("WebSocket session closed", {
 			type: event.type,
 			code: event.code,
@@ -231,6 +273,9 @@ export class VcmpSession {
 	};
 
 	private handleError = () => {
+		if (this.closed) {
+			return;
+		}
 		this.debug?.warn("WebSocket session error");
 		if (this.webSocket) {
 			this.webSocket.close();
@@ -238,6 +283,9 @@ export class VcmpSession {
 	};
 
 	private handleMessage = (event: VcmpMessageEvent) => {
+		if (this.closed) {
+			return;
+		}
 		if (typeof event.data == "string") {
 			this.debug?.debug("Received frame", event.data);
 			let frame: ReturnType<typeof parseVcmpFrame>;
@@ -289,20 +337,20 @@ export class VcmpSession {
 			this.sendFrame(frame);
 		}
 		catch (error) {
-			// The connection is in an uncertain state — close it, which settles all
+			// The connection is in an uncertain state — abandon it, which settles all
 			// pending sends via the close path. Mirrors the Java implementation.
-			this.debug?.warn("Could not send heartbeat. Closing session.", error);
-			this.close();
+			this.debug?.warn("Could not send heartbeat. Abandoning session.", error);
+			this.abandon("Could not send heartbeat");
 			return;
 		}
 
 		// Arm the watchdog after a successful send: if the peer never sends a heartbeat
-		// back within 2 x interval, the connection is considered dead and closed. This
+		// back within 2 x interval, the connection is considered dead and abandoned. This
 		// also covers a peer that connects but never answers the initial heartbeat at all.
 		clearTimeout(this.heartbeatReceiveTimeout as any);
 		this.heartbeatReceiveTimeout = setTimeout(() => {
-			this.debug?.warn("Did not receive heartbeat in time. Closing session.");
-			this.close();
+			this.debug?.warn("Did not receive heartbeat in time. Abandoning session.");
+			this.abandon("Did not receive heartbeat in time");
 		}, 2 * frame.heartbeatInterval);
 	}
 

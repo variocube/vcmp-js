@@ -33,6 +33,30 @@ class SyncAckWebSocket extends FakeWebSocket {
 	}
 }
 
+/** A socket on a black-holed connection: close() starts the handshake, but no close event ever arrives. */
+class BlackHoledWebSocket extends FakeWebSocket {
+	closeCalls = 0;
+
+	close() {
+		this.closeCalls++;
+		this.readyState = 2; // CLOSING
+	}
+
+	fireLateClose() {
+		this.readyState = 3; // CLOSED
+		this.onclose?.({type: "close", code: 1006, reason: ""});
+	}
+}
+
+/** Like Node's `ws`: terminate() destroys the connection without a handshake. */
+class TerminableWebSocket extends BlackHoledWebSocket {
+	terminateCalls = 0;
+
+	terminate() {
+		this.terminateCalls++;
+	}
+}
+
 function createSession(webSocket: FakeWebSocket, resolver: (type: string) => any = () => undefined) {
 	return new VcmpSession({webSocket: webSocket as any, resolver});
 }
@@ -234,6 +258,111 @@ describe("VcmpSession", () => {
 		await sleep(100);
 		expect(webSocket.readyState).to.be.equal(1);
 		session.close();
+	});
+
+	it("abandons a session whose heartbeat is never answered without waiting for the close event", async () => {
+		const webSocket = new BlackHoledWebSocket();
+		const session = createSession(webSocket);
+		let closeEvents = 0;
+		session.onClose = () => closeEvents++;
+		const pending = session.send({"@type": "foo"});
+		const rejected = pending.then(() => expect.fail("Expected error"), error => error);
+		session.initiateHeartbeat(10);
+		await waitFor(() => closeEvents > 0);
+		expect(webSocket.closeCalls).to.be.equal(1);
+		// the socket still reports CLOSING, but the session must not treat it as usable
+		expect(session.isOpen).to.be.false;
+		const error = await rejected;
+		expect(error).to.be.instanceOf(VcmpError);
+		expect(error.title).to.be.equal("Session closed");
+		// the socket's events arriving much later must change nothing
+		const sentFrames = webSocket.sent.length;
+		webSocket.receive("HBT10");
+		webSocket.receive(`MSGabcdefghijkl{"@type":"foo"}`);
+		webSocket.onerror?.();
+		webSocket.fireLateClose();
+		await sleep(30);
+		expect(closeEvents).to.be.equal(1);
+		expect(webSocket.sent).to.have.length(sentFrames);
+		expect(webSocket.closeCalls).to.be.equal(1);
+	});
+
+	it("abandons the session when the expected heartbeat never arrives", async () => {
+		const webSocket = new BlackHoledWebSocket();
+		const session = createSession(webSocket);
+		let closeEvents = 0;
+		session.onClose = () => closeEvents++;
+		session.expectHeartbeat(10);
+		await waitFor(() => closeEvents > 0);
+		expect(session.isOpen).to.be.false;
+	});
+
+	it("abandons the session when sending a heartbeat fails", () => {
+		const webSocket = new BlackHoledWebSocket();
+		webSocket.send = () => {
+			throw new Error("boom");
+		};
+		const session = createSession(webSocket);
+		let closeEvents = 0;
+		session.onClose = () => closeEvents++;
+		session.initiateHeartbeat(10);
+		expect(closeEvents).to.be.equal(1);
+		expect(session.isOpen).to.be.false;
+	});
+
+	it("terminates the socket instead of closing it where supported", async () => {
+		const webSocket = new TerminableWebSocket();
+		const session = createSession(webSocket);
+		let closeEvents = 0;
+		session.onClose = () => closeEvents++;
+		session.expectHeartbeat(10);
+		await waitFor(() => closeEvents > 0);
+		expect(webSocket.terminateCalls).to.be.equal(1);
+		expect(webSocket.closeCalls).to.be.equal(0);
+	});
+
+	it("closes an abandoned session exactly once when tearing down the socket closes it synchronously", async () => {
+		const webSocket = new TerminableWebSocket();
+		webSocket.terminate = () => webSocket.fireLateClose();
+		const session = createSession(webSocket);
+		let closeEvents = 0;
+		session.onClose = () => closeEvents++;
+		const pending = session.send({"@type": "foo"});
+		const rejected = pending.then(() => expect.fail("Expected error"), error => error);
+		session.expectHeartbeat(10);
+		await waitFor(() => closeEvents > 0);
+		expect((await rejected).title).to.be.equal("Session closed");
+		await sleep(20);
+		expect(closeEvents).to.be.equal(1);
+	});
+
+	it("does not raise onOpen when the first heartbeat on opening abandons the session", () => {
+		const webSocket = new BlackHoledWebSocket();
+		webSocket.readyState = 0; // CONNECTING
+		webSocket.send = () => {
+			throw new Error("boom");
+		};
+		const session = createSession(webSocket);
+		const events: string[] = [];
+		session.onOpen = () => events.push("open");
+		session.onClose = () => events.push("close");
+		session.initiateHeartbeat(10);
+		webSocket.readyState = 1;
+		webSocket.onopen?.();
+		expect(events).to.deep.equal(["close"]);
+	});
+
+	it("closes an abandoned session even when tearing down the socket throws", async () => {
+		const webSocket = new TerminableWebSocket();
+		webSocket.terminate = () => {
+			throw new Error("boom");
+		};
+		const session = createSession(webSocket);
+		let closeEvents = 0;
+		session.onClose = () => closeEvents++;
+		session.expectHeartbeat(10);
+		await waitFor(() => closeEvents > 0);
+		expect(session.isOpen).to.be.false;
 	});
 
 	it("NAKs with a fallback when the handler error cannot be serialized", async () => {

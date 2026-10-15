@@ -49,10 +49,16 @@ export class VcmpServer {
 				this.onSessionDisconnected(session);
 			};
 
-			session.initiateHeartbeat(heartbeatInterval);
-
+			// Register the session before starting the heartbeat: a failing first heartbeat
+			// abandons the session synchronously, and its disconnect must follow the connect.
+			// A throwing onSessionConnected must not leave the session without a heartbeat.
 			this.#sessions.add(session);
-			this.onSessionConnected(session);
+			try {
+				this.onSessionConnected(session);
+			}
+			finally {
+				session.initiateHeartbeat(heartbeatInterval);
+			}
 		});
 	}
 
