@@ -36,6 +36,20 @@ class ControlledWebSocket {
 	}
 }
 
+function sleep(timeoutMs: number) {
+	return new Promise<void>(resolve => setTimeout(resolve, timeoutMs));
+}
+
+async function waitFor(condition: () => boolean, timeoutMs = 2000) {
+	const start = Date.now();
+	while (!condition()) {
+		if (Date.now() - start > timeoutMs) {
+			throw new Error("Timed out waiting for condition");
+		}
+		await sleep(5);
+	}
+}
+
 describe("VcmpClient", () => {
 	it("can instantiate client and start/stop", () => {
 		const client = new VcmpClient("ws://localhost:22", {
@@ -105,8 +119,45 @@ describe("VcmpClient", () => {
 		socket.open();
 		expect(client.connected).to.be.true;
 		await new Promise<void>(resolve => setTimeout(resolve, 80));
-		expect(client.connected).to.be.false;
+		// the session is gone (connected is undefined) rather than holding on to the abandoned socket
+		expect(client.connected).to.not.be.true;
 		client.stop();
+	});
+
+	it("reconnects promptly when the heartbeat watchdog abandons a connection that never closes", async () => {
+		ControlledWebSocket.instances = [];
+		const client = new VcmpClient("ws://test", {
+			customWebSocket: ControlledWebSocket as any,
+			initialHeartbeatTimeout: 20,
+			reconnectTimeout: 20,
+		});
+		let closeEvents = 0;
+		client.onClose = () => closeEvents++;
+		client.start();
+		const first = ControlledWebSocket.instances[0];
+		first.open();
+		const pending = client.send({"@type": "foo"});
+		const rejected = pending.then(() => expect.fail("Expected error"), error => error);
+		// ControlledWebSocket.close() never delivers a close event, like a black-holed connection:
+		// the reconnect must not wait for it
+		await waitFor(() => ControlledWebSocket.instances.length === 2);
+		expect(closeEvents).to.be.equal(1);
+		expect((await rejected).title).to.be.equal("Session closed");
+		expect(ControlledWebSocket.instances).to.have.length(2);
+		const second = ControlledWebSocket.instances[1];
+		second.open();
+		// the server initiates the heartbeat on the new connection, which keeps it alive
+		second.onmessage?.({data: "HBT1000"});
+		expect(client.connected).to.be.true;
+		// the first socket's close event finally arrives and must neither notify nor reconnect
+		first.fireClose();
+		await sleep(60);
+		expect(closeEvents).to.be.equal(1);
+		expect(ControlledWebSocket.instances).to.have.length(2);
+		expect(client.connected).to.be.true;
+		client.stop();
+		// deliver the close event, which clears the running heartbeat timer
+		second.fireClose();
 	});
 
 	it("cancels a pending reconnect when start() is called", async () => {

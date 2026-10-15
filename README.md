@@ -78,14 +78,22 @@ where a bound is needed. The same policy applies in the Java implementation (vcm
 `VcmpCallback.await(...)` serves that purpose.
 
 A send on an open session whose peer never acknowledges stays pending until the session closes.
-A dead connection is detected by the heartbeat and closed — provided the heartbeat is running:
-`VcmpServer` initiates it automatically on every connection (`heartbeatInterval`, default 20 s),
-and both sides then watchdog it. `VcmpClient` additionally expects the server to initiate a
-heartbeat within `initialHeartbeatTimeout` (default 60 s, a value of 0 or below disables it) of
-the connection opening and closes the session otherwise — so a half-open connection through which
-no heartbeat ever arrives cannot leave sends pending indefinitely. A standalone `VcmpSession` only
-has this protection once `initiateHeartbeat` is called (or the peer initiates and `expectHeartbeat`
-bounds the wait for it).
+A dead connection is detected by the heartbeat and abandoned (see below) — provided the heartbeat
+is running: `VcmpServer` initiates it automatically on every connection (`heartbeatInterval`,
+default 20 s), and both sides then watchdog it. `VcmpClient` additionally expects the server to
+initiate a heartbeat within `initialHeartbeatTimeout` (default 60 s, a value of 0 or below disables
+it) of the connection opening and abandons the session otherwise — so a half-open connection
+through which no heartbeat ever arrives cannot leave sends pending indefinitely. A standalone
+`VcmpSession` only has this protection once `initiateHeartbeat` is called (or the peer initiates
+and `expectHeartbeat` bounds the wait for it).
+
+Abandoning a dead connection does not wait for the WebSocket close handshake, which a dead peer
+never answers — on a connection that silently drops packets, the socket's close event would only
+arrive once TCP gives up (up to around 15 minutes for a browser WebSocket) or, with `ws`, once its
+close timeout expires (30 s by default). Instead, the socket is terminated where the
+implementation supports it (`ws`) and closed otherwise, and the session closes immediately: pending
+sends are rejected, `onClose` is raised once, and `VcmpClient` schedules its reconnect (after
+`reconnectTimeout`) without waiting for the socket. The socket's late close event is ignored.
 
 Note that a `VcmpError` rejection no longer implies the peer answered: 503 describes a local
 transport condition, while a NAK carries the peer's own status. A rejection other than a NAK also
