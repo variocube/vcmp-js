@@ -1,14 +1,14 @@
+import {describeVcmpFrame, generateVcmpFrameId, serializeVcmpFrame} from "@variocube/vcmp";
 import {expect} from "chai";
-import {generateVcmpFrameId, serializeVcmpFrame} from "@variocube/vcmp";
 import {parseVcmpFrame} from "../src";
 
-describe('frame', () => {
-    it('can generate frame id', () => {
-        const frameId = generateVcmpFrameId();
-        expect(frameId).to.be.a('string').length(12);
-    });
+describe("frame", () => {
+	it("can generate frame id", () => {
+		const frameId = generateVcmpFrameId();
+		expect(frameId).to.be.a("string").length(12);
+	});
 
-	it('can serialize a message frame', () => {
+	it("can serialize a message frame", () => {
 		const frame = serializeVcmpFrame({type: "MSG", id: "123456789012", payload: "foo"});
 		expect(frame).to.be.eq("MSG123456789012foo");
 	});
@@ -66,5 +66,21 @@ describe('frame', () => {
 	it("can parse a HBT frame", () => {
 		const frame = parseVcmpFrame("HBT1000");
 		expect(frame).to.be.deep.eq({type: "HBT", heartbeatInterval: 1000});
+	});
+
+	it("can serialize an AUT frame", () => {
+		const frame = serializeVcmpFrame({type: "AUT", id: "123456789012", payload: "{\"token\":\"t\"}"});
+		expect(frame).to.be.eq("AUT123456789012{\"token\":\"t\"}");
+	});
+
+	it("can parse an AUT frame", () => {
+		const frame = parseVcmpFrame("AUT123456789012{\"token\":\"t\"}");
+		expect(frame).to.be.deep.eq({type: "AUT", id: "123456789012", payload: "{\"token\":\"t\"}"});
+	});
+
+	it("redacts the payload of an AUT frame for debug output", () => {
+		expect(describeVcmpFrame("AUT123456789012{\"token\":\"t\"}")).to.be.eq("AUT123456789012[redacted]");
+		expect(describeVcmpFrame("AUT123456789012")).to.be.eq("AUT123456789012");
+		expect(describeVcmpFrame("MSG123456789012foo")).to.be.eq("MSG123456789012foo");
 	});
 });
