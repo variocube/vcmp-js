@@ -704,6 +704,31 @@ describe("VcmpServer authentication", function() {
 				expect((await peer.expectClose()).code).to.equal(1008);
 			});
 
+			it("decides on one expiresIn: never acknowledges with expiresIn 0 when the clock moves on", async () => {
+				// The clock advances 1 ms on every read, starting 1 ms before the expiry: a library that checks the
+				// expiry and computes expiresIn with two reads would acknowledge with expiresIn 0.
+				const realNow = Date.now;
+				let restore = () => {};
+				harness = await startServer({
+					authenticate: () => {
+						const expiresAt = realNow() + 60000;
+						let now = expiresAt - 1;
+						Date.now = () => now++;
+						restore = () => Date.now = realNow;
+						return {principal: {user: "alice"}, expiresAt: new Date(expiresAt)};
+					},
+				});
+				try {
+					const peer = await connect();
+					peer.aut("auth00000001", {token: "x"});
+					const ack = JSON.parse(await peer.expectFrame("ACKauth00000001"));
+					expect(ack.expiresIn).to.equal(1);
+				}
+				finally {
+					restore();
+				}
+			});
+
 			it("rejects a refresh with NAK 401, the session stays until the old expiry", async () => {
 				let calls = 0;
 				harness = await startServer({

@@ -254,14 +254,15 @@ export class VcmpSession<P = unknown> {
 			this.handshakeRejected(new Error("The handshake authenticator returned an invalid authentication."));
 			return;
 		}
-		if (isExpired(authentication)) {
+		const expiresIn = expiresInOf(authentication.expiresAt);
+		if (expiresIn !== undefined && expiresIn <= 0) {
 			this.handshakeRejected(new Error("The handshake credential has expired."));
 			return;
 		}
 		this.authenticated = true;
 		this.authenticatedPrincipal = authentication.principal;
 		this.authenticationTimeout?.clear();
-		this.armExpiry(expiresInOf(authentication.expiresAt));
+		this.armExpiry(expiresIn);
 		this.onAuthenticated?.({source: "handshake", reauthentication: false, ack: {}});
 	}
 
@@ -696,8 +697,10 @@ export class VcmpSession<P = unknown> {
 			if (!isValidAuthentication(authentication)) {
 				throw new Error("The authenticator returned no principal or an invalid authentication.");
 			}
-			if (isExpired(authentication)) {
-				// An expiry that is already over: the credential is rejected
+			// Computed once: the expiry decided on here is the one sent in the ACK
+			expiresIn = expiresInOf(authentication.expiresAt);
+			if (expiresIn !== undefined && expiresIn <= 0) {
+				// An expiry that is already over: the credential is rejected, never acknowledged with expiresIn 0
 				this.debug?.info("Authentication failed: the credential has expired");
 				fail(EXPIRED_CREDENTIAL);
 				return;
@@ -714,11 +717,10 @@ export class VcmpSession<P = unknown> {
 				}, AuthenticationCloseReason.PRINCIPAL_CHANGED);
 				return;
 			}
-			expiresIn = expiresInOf(authentication.expiresAt);
 			ack = {...authentication.ack};
 			delete ack.expiresIn;
 			if (expiresIn !== undefined) {
-				ack.expiresIn = Math.floor(expiresIn);
+				ack.expiresIn = expiresIn;
 			}
 			ackPayload = Object.keys(ack).length > 0 ? JSON.stringify(ack) : undefined;
 		}
@@ -1195,12 +1197,10 @@ const EXPIRED_CREDENTIAL: ProblemDetail = {
 	detail: "The credential has expired.",
 };
 
-/** Whether an authentication's expiry is already over (not in the future). */
-function isExpired(authentication: VcmpAuthentication<unknown>) {
-	return authentication.expiresAt !== undefined && authentication.expiresAt.getTime() <= Date.now();
-}
-
-/** Milliseconds until an authenticator's expiry, at least 0; `undefined` without expiry. */
+/**
+ * Milliseconds from now until an authenticator's expiry, `undefined` without expiry. Not clamped: a value
+ * ≤ 0 means the expiry is already over (`Date` has whole milliseconds, so the value is an integer).
+ */
 function expiresInOf(expiresAt: Date | undefined) {
-	return expiresAt === undefined ? undefined : Math.max(0, expiresAt.getTime() - Date.now());
+	return expiresAt === undefined ? undefined : expiresAt.getTime() - Date.now();
 }
