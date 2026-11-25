@@ -518,6 +518,38 @@ describe("VcmpServer authentication", function() {
 			expect((await peer.expectClose()).code).to.equal(1008);
 		});
 
+		it("treats an authenticator that throws synchronously on a refresh like a rejecting one: NAK 500, session stays", async () => {
+			let calls = 0;
+			harness = await startServer({
+				// not async: throws before returning a promise
+				authenticate: credential => {
+					if (calls++ > 0) {
+						throw new Error("boom");
+					}
+					return tokenAuthenticator(credential);
+				},
+			});
+			const peer = await connect();
+			peer.aut("auth00000001", {token: "valid:alice"});
+			await peer.expectFrame("ACKauth00000001");
+			peer.aut("auth00000002", {token: "valid:alice"});
+			expect(JSON.parse(await peer.expectFrame("NAKauth00000002")).status).to.equal(500);
+			peer.msg("msg000000001", {"@type": "echo"});
+			await peer.expectFrame("ACKmsg000000001");
+		});
+
+		it("closes with 1008 when the handshake authenticator throws synchronously", async () => {
+			harness = await startServer({
+				authenticateHandshake: () => {
+					throw new Error("invalid");
+				},
+			});
+			const peer = await connect();
+			expect(await peer.expectClose()).to.deep.equal({code: 1008, reason: "authentication failed"});
+			expect(harness.events).to.deep.equal([]);
+		});
+
+		// a synchronously throwing authenticator (not async), as opposed to a rejecting one
 		it("answers an unexpected authenticator failure with NAK 500 without leaking its message, and closes", async () => {
 			harness = await startServer({
 				authenticate: () => {

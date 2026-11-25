@@ -224,6 +224,57 @@ describe("VcmpClient authentication", function() {
 		expect(server.connections[0].closed).to.deep.equal({code: 4008, reason: "authentication timeout"});
 	});
 
+	it("treats a credential provider that throws synchronously like a rejecting one", async () => {
+		const errors: VcmpError[] = [];
+		const client = createClient({
+			// not async: throws before returning a promise
+			authenticate: () => {
+				throw new Error("no token");
+			},
+			reconnectTimeout: 1000,
+		});
+		client.onAuthenticationError = error => errors.push(error);
+		const closed = new Promise<void>(resolve => client.onClose = () => resolve());
+		client.start();
+		await closed;
+		expect(errors.map(error => error.status)).to.deep.equal([500]);
+		await waitFor(() => server.connections[0]?.closed !== undefined);
+		expect(server.connections[0].closed).to.deep.equal({code: 4008, reason: "authentication failed"});
+		expect(server.auts()).to.have.length(0);
+	});
+
+	it("handles a NAK 503 to the first AUT like any NAK: closes with 4008 and reconnects", async () => {
+		server.onAut = (credential, connection) =>
+			server.connections.indexOf(connection) == 0 ? `NAK{"title":"Overloaded","status":503}` : "ACK";
+		const errors: VcmpError[] = [];
+		const client = createClient({authenticate: async () => ({token: "t"})});
+		client.onAuthenticationError = error => errors.push(error);
+		const opened = new Promise<void>(resolve => client.onOpen = () => resolve());
+		client.start();
+		await opened;
+		expect(errors.map(error => error.status)).to.deep.equal([503]);
+		expect(server.connections[0].closed).to.deep.equal({code: 4008, reason: "authentication failed"});
+		expect(server.connections).to.have.length(2);
+	});
+
+	it("retries a refresh answered with NAK 503 until the expiry", async () => {
+		server.onAut = (credential, connection) =>
+			server.auts(connection).length == 1 ? `ACK{"expiresIn":3500}` : `NAK{"title":"Overloaded","status":503}`;
+		const errors: number[] = [];
+		const client = createClient({
+			authenticate: async () => ({token: "t"}),
+			refreshLeadTime: 1500,
+			refreshRetryDelay: 1000,
+		});
+		client.onAuthenticationError = error => errors.push(error.status);
+		client.start();
+		await sleep(3800);
+		expect(server.auts()).to.have.length(3);
+		expect(errors).to.deep.equal([503, 503]);
+		expect(server.connections).to.have.length(1);
+		expect(client.connected).to.be.true;
+	});
+
 	it("reports a failing credential provider and closes the session", async () => {
 		const errors: VcmpError[] = [];
 		const client = createClient({
