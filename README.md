@@ -127,7 +127,7 @@ implemented wire-compatibly by vcmp-spring, vcmp-js and vcmp-rs).
   for an authentication reason is closed with code **1008** (policy violation); a client closes with
   **4008** instead (a browser's WebSocket only lets a client close with 1000 or 3000–4999), which peers
   treat like 1008. Both give an informative reason:
-  `authentication required` (a frame other than `HBT`/`AUT` first), `authentication timeout` (no
+  `authentication required` (a frame other than `HBT`/`AUT` first, including one that can't be parsed), `authentication timeout` (no
   successful `AUT` within the timeout, default 10 s from connect until the first `ACK` is sent, so it
   also covers a hanging authenticator), `authentication failed` (`NAK` to the first `AUT`),
   `authentication expired`, `principal changed`, `concurrent authentication` (a second `AUT` while one is
@@ -136,6 +136,8 @@ implemented wire-compatibly by vcmp-spring, vcmp-js and vcmp-rs).
   principal → `ACK` with the new `expiresIn` (the expiry is replaced, or removed). Another principal →
   `NAK` 403 and the session closes: a session never changes identity. Any other failure (`NAK` 400, 401,
   403 or 500) keeps the session open until its current expiry.
+- An authentication whose expiry is already over (not in the future) is a rejected credential: `NAK` 401
+  (a handshake credential: closed with 1008).
 - A session is authenticated only once its `ACK` is out: a failure after the authenticator accepted (no
   principal, the principal comparison throws, the `ACK` payload can't be serialized) is answered with
   `NAK` 500 and fails closed like an authenticator failure.
@@ -161,18 +163,25 @@ client.onAuthenticationError = error => console.warn("Authentication failed", er
   `connected` becomes `true`, only after the `ACK`; `client.authentication` holds its payload.
 - A `NAK`, no answer within `authenticationTimeout` (default 10 s; e.g. an older server that doesn't know
   `AUT`) or a failing credential provider is reported to `onAuthenticationError` (the `NAK`'s problem
-  detail; 504 for the timeout; 500 for the provider). The client then closes the session (4008) and
-  reconnects after `reconnectTimeout` with a fresh credential. Held messages are rejected (503).
+  detail; 504 for the timeout; 500 for the provider). The client then closes the session with 4008 —
+  reason `authentication failed` after a `NAK` or a failed provider, `authentication timeout` without an
+  answer — and reconnects after `reconnectTimeout` with a fresh credential. Held messages are rejected
+  (503). The answer timeout starts when the credential is requested, so a provider that never completes
+  ends like an unanswered `AUT`.
 - When the `ACK` carries `expiresIn`, the client re-authenticates `refreshLeadTime` before the expiry
   (default `min(60 s, 20 % of expiresIn)`; a number or a function of `expiresIn`), counted from receiving
   the `ACK`, so clock skew between client and server doesn't matter. The lead time is at most half of
   `expiresIn`, and a refresh is never sent sooner than 1 s after the `ACK`, so no setting can cause a
-  refresh loop. A refresh answered with a `NAK` (or
-  whose credential provider fails) is reported and retried every `refreshRetryDelay` (default 5 s) until
-  the expiry, after which the server closes the session and the client reconnects as usual. A refresh
-  that gets no answer within `authenticationTimeout` is reported (504) and not retried on that session
-  (the server may still be processing it, and a second `AUT` would close the session as concurrent): the
-  client closes the session (4008) and reconnects with a fresh credential.
+  refresh loop. A refresh answered with a `NAK` is reported and retried every `refreshRetryDelay`
+  (default 5 s) until the expiry, after which the server closes the session and the client reconnects as
+  usual. A refresh without an answer within `authenticationTimeout` (the server may still be processing
+  it, and a second `AUT` would close the session as concurrent) or with a failing credential provider is
+  reported and not retried on that session: the client closes it (4008) and reconnects with a fresh
+  credential.
+- `authenticationTimeout` and `refreshRetryDelay` must be at least 1 s; smaller values throw a
+  `RangeError` when the client is constructed.
+- A malformed `ACK` is tolerated with a warning: a payload that isn't a JSON object counts as no payload,
+  an `expiresIn` that isn't a non-negative integer as absent (no refresh; the server decides about expiry).
 
 Without `authenticate`, the client behaves exactly as before.
 

@@ -6,6 +6,7 @@ import {
 	CLIENT_AUTHENTICATION_CLOSE_CODE,
 	computeRefreshDelay,
 	isCredential,
+	validateClientAuthentication,
 	VcmpAuthenticatedEvent,
 	VcmpAuthentication,
 	VcmpAuthenticationAck,
@@ -59,6 +60,9 @@ export class VcmpSession<P = unknown> {
 		this.webSocket = webSocket;
 		this.resolver = resolver;
 		this.debug = debug;
+		if (clientAuthentication) {
+			validateClientAuthentication(clientAuthentication);
+		}
 		this.clientAuthentication = clientAuthentication;
 		this.serverAuthentication = serverAuthentication;
 
@@ -113,6 +117,7 @@ export class VcmpSession<P = unknown> {
 	// expiry (local clock, counted from receiving the ACK)
 	private pendingAuthenticationId?: string;
 	private pendingAuthenticationIsRefresh = false;
+	private currentAttempt?: object;
 	private answerTimeout?: ReturnType<typeof setTimeout>;
 	private refreshTimeout?: LongTimeout;
 	private expiresAt?: number;
@@ -247,6 +252,10 @@ export class VcmpSession<P = unknown> {
 		}
 		if (!isValidAuthentication(authentication)) {
 			this.handshakeRejected(new Error("The handshake authenticator returned an invalid authentication."));
+			return;
+		}
+		if (isExpired(authentication)) {
+			this.handshakeRejected(new Error("The handshake credential has expired."));
 			return;
 		}
 		this.authenticated = true;
@@ -524,6 +533,11 @@ export class VcmpSession<P = unknown> {
 			this.heldInbound.push(event);
 			return;
 		}
+		if (typeof event.data != "string" && this.serverAuthentication && !this.authenticated) {
+			// A binary frame is no VCMP frame: before authentication, only HBT and AUT are accepted
+			this.closeForPolicy(AuthenticationCloseReason.REQUIRED);
+			return;
+		}
 		if (typeof event.data == "string") {
 			const described = describeVcmpFrame(event.data);
 			this.debug?.debug("Received frame", described);
@@ -532,6 +546,12 @@ export class VcmpSession<P = unknown> {
 				frame = parseVcmpFrame(event.data);
 			}
 			catch (error) {
+				if (this.serverAuthentication && !this.authenticated) {
+					// Before authentication, only HBT and AUT are accepted
+					this.debug?.warn("Invalid frame before authentication", described);
+					this.closeForPolicy(AuthenticationCloseReason.REQUIRED);
+					return;
+				}
 				// A throw from the message event would be an uncaught exception under Node's
 				// `ws` and could take the whole process down. Log and drop the frame instead.
 				this.debug?.warn("Ignoring invalid frame", described, error);
@@ -676,6 +696,12 @@ export class VcmpSession<P = unknown> {
 			if (!isValidAuthentication(authentication)) {
 				throw new Error("The authenticator returned no principal or an invalid authentication.");
 			}
+			if (isExpired(authentication)) {
+				// An expiry that is already over: the credential is rejected
+				this.debug?.info("Authentication failed: the credential has expired");
+				fail(EXPIRED_CREDENTIAL);
+				return;
+			}
 			if (
 				!first
 				&& !serverAuthentication.principalEquals(this.authenticatedPrincipal as P, authentication.principal)
@@ -743,89 +769,101 @@ export class VcmpSession<P = unknown> {
 
 	// --- client role ---
 
+	/**
+	 * One authentication attempt: obtaining the credential, sending the AUT and waiting for the answer. The
+	 * answer timeout starts when the credential is requested, so a provider that never completes ends like an
+	 * unanswered AUT. The attempt ends exactly once: with the answer, a failure, or the timeout.
+	 */
 	private startClientAuthentication(refresh: boolean) {
 		const clientAuthentication = this.clientAuthentication;
 		if (!clientAuthentication || this.authenticationPending) {
 			return;
 		}
+		const attempt = {};
+		this.currentAttempt = attempt;
 		this.authenticationPending = true;
 		this.pendingAuthenticationIsRefresh = refresh;
+		const isCurrent = () => this.currentAttempt === attempt && !this.closed && !this.policyClosing;
+		const end = () => {
+			clearTimeout(this.answerTimeout as any);
+			this.currentAttempt = undefined;
+			this.pendingAuthenticationId = undefined;
+			this.authenticationPending = false;
+		};
+		const failCredential = (error: VcmpError) => {
+			end();
+			this.clientAuthenticationFailed(error, refresh, "credential");
+		};
+
+		this.answerTimeout = setTimeout(() => {
+			if (!isCurrent()) {
+				return;
+			}
+			end();
+			this.clientAuthenticationFailed(
+				authenticationError(504, "Authentication timeout", "The authentication was not answered in time."),
+				refresh,
+				"timeout",
+			);
+		}, clientAuthentication.timeout);
+
 		asyncExecute(async () => {
 			let credential: unknown;
 			try {
 				credential = await clientAuthentication.authenticate();
 			}
 			catch (error) {
-				this.authenticationPending = false;
-				if (!this.closed && !this.policyClosing) {
-					this.clientAuthenticationFailed(
+				if (isCurrent()) {
+					failCredential(
 						authenticationError(500, "Credential unavailable", "The credential provider failed.", error),
-						refresh,
 					);
 				}
 				return;
 			}
-			if (this.closed || this.policyClosing) {
-				this.authenticationPending = false;
+			if (!isCurrent()) {
 				return;
 			}
 			if (!isCredential(credential)) {
-				this.authenticationPending = false;
-				this.clientAuthenticationFailed(
+				failCredential(
 					authenticationError(500, "Invalid credential", "The credential provider must return an object."),
-					refresh,
 				);
 				return;
 			}
-			const id = generateVcmpFrameId();
-			this.pendingAuthenticationId = id;
-			// Armed before sending: a synchronously delivering socket can deliver the answer during sendFrame
-			this.answerTimeout = setTimeout(() => {
-				this.pendingAuthenticationId = undefined;
-				this.authenticationPending = false;
-				this.clientAuthenticationFailed(
-					authenticationError(
-						504,
-						"Authentication timeout",
-						"The server did not answer the authentication in time.",
-					),
-					refresh,
-					true,
-				);
-			}, clientAuthentication.timeout);
 			let payload: string;
 			try {
 				payload = JSON.stringify(credential);
 			}
-			catch (error) {
-				clearTimeout(this.answerTimeout as any);
-				this.pendingAuthenticationId = undefined;
-				this.authenticationPending = false;
-				this.clientAuthenticationFailed(
+			catch {
+				failCredential(
 					authenticationError(500, "Invalid credential", "The credential could not be serialized."),
-					refresh,
 				);
 				return;
 			}
+			const id = generateVcmpFrameId();
+			// Set before sending: a synchronously delivering socket can deliver the answer during sendFrame
+			this.pendingAuthenticationId = id;
 			try {
 				this.sendFrame({type: "AUT", id, payload});
 			}
 			catch (error) {
-				clearTimeout(this.answerTimeout as any);
-				this.pendingAuthenticationId = undefined;
-				this.authenticationPending = false;
-				this.clientAuthenticationFailed(
-					authenticationError(503, "Send failed", "The authentication could not be sent.", error),
-					refresh,
-				);
+				if (isCurrent()) {
+					failCredential(
+						authenticationError(503, "Send failed", "The authentication could not be sent.", error),
+					);
+				}
 			}
 		});
 	}
 
-	private handleAuthenticationAck(payload: string | undefined) {
+	private endClientAttempt() {
 		clearTimeout(this.answerTimeout as any);
+		this.currentAttempt = undefined;
 		this.pendingAuthenticationId = undefined;
 		this.authenticationPending = false;
+	}
+
+	private handleAuthenticationAck(payload: string | undefined) {
+		this.endClientAttempt();
 		let ack: VcmpAuthenticationAck = {};
 		if (payload) {
 			try {
@@ -856,9 +894,7 @@ export class VcmpSession<P = unknown> {
 	}
 
 	private handleAuthenticationNak(payload: string | undefined) {
-		clearTimeout(this.answerTimeout as any);
-		this.pendingAuthenticationId = undefined;
-		this.authenticationPending = false;
+		this.endClientAttempt();
 		let error: VcmpError;
 		try {
 			error = payload
@@ -873,14 +909,15 @@ export class VcmpSession<P = unknown> {
 				parseError,
 			);
 		}
-		this.clientAuthenticationFailed(error, this.pendingAuthenticationIsRefresh);
+		this.clientAuthenticationFailed(error, this.pendingAuthenticationIsRefresh, "nak");
 	}
 
 	/**
-	 * @param noAnswer the server did not answer the AUT in time: it may still be processing it, so another
-	 * AUT on this session would be a concurrent one, which the server closes the session for
+	 * @param failure `timeout`: no answer (or no credential) in time — the server may still be processing the
+	 * AUT, so another one on this session would be concurrent, which the server closes the session for;
+	 * `credential`: the provider failed or its credential is unusable; `nak`: the server rejected it.
 	 */
-	private clientAuthenticationFailed(error: VcmpError, refresh: boolean, noAnswer = false) {
+	private clientAuthenticationFailed(error: VcmpError, refresh: boolean, failure: "nak" | "timeout" | "credential") {
 		this.debug?.warn("Authentication failed", error.status, error.title);
 		try {
 			this.onAuthenticationError?.(error);
@@ -888,20 +925,20 @@ export class VcmpSession<P = unknown> {
 		catch (handlerError) {
 			this.debug?.warn("Error in authentication error handler", handlerError);
 		}
-		if (noAnswer) {
+		if (failure == "timeout") {
 			// Neither a first authentication nor a refresh can be retried on this session: close it, so that
 			// the client reconnects with a fresh credential
 			this.closeForPolicy(AuthenticationCloseReason.TIMEOUT);
 			return;
 		}
-		if (!refresh) {
+		if (failure == "credential" || !refresh) {
 			// The session is unusable: close it, so that the client reconnects with a fresh credential
 			this.closeForPolicy(AuthenticationCloseReason.FAILED);
 			return;
 		}
-		// A rejected (NAK) or unsent (credential provider failed) refresh: retry until the expiry; after it,
-		// the server closes the session and the client reconnects. After a NAK 403 for another principal the
-		// server closes the session right away, which cancels the retry.
+		// A refresh answered with NAK: retry until the expiry; after it, the server closes the session and the
+		// client reconnects. After a NAK 403 for another principal the server closes the session right away,
+		// which cancels the retry.
 		const retryDelay = this.clientAuthentication?.refreshRetryDelay ?? 0;
 		if (this.expiresAt !== undefined && Date.now() + retryDelay < this.expiresAt) {
 			this.refreshTimeout?.clear();
@@ -1151,6 +1188,17 @@ const UNEXPECTED_FAILURE: ProblemDetail = {
 	status: 500,
 	detail: "The authenticator failed unexpectedly.",
 };
+
+const EXPIRED_CREDENTIAL: ProblemDetail = {
+	title: "Credential expired",
+	status: 401,
+	detail: "The credential has expired.",
+};
+
+/** Whether an authentication's expiry is already over (not in the future). */
+function isExpired(authentication: VcmpAuthentication<unknown>) {
+	return authentication.expiresAt !== undefined && authentication.expiresAt.getTime() <= Date.now();
+}
 
 /** Milliseconds until an authenticator's expiry, at least 0; `undefined` without expiry. */
 function expiresInOf(expiresAt: Date | undefined) {

@@ -54,7 +54,7 @@ export interface VcmpSessionServerAuthentication<P> {
 export interface VcmpSessionClientAuthentication {
 	/** Provides the credential; called on every connect and for every refresh. */
 	authenticate(): Promise<object> | object;
-	/** Time in milliseconds within which the server must answer an `AUT`. */
+	/** Time in milliseconds, from requesting the credential, within which the server must answer the `AUT`. */
 	timeout: number;
 	/**
 	 * How long before the expiry the session re-authenticates, in milliseconds, either fixed or computed
@@ -62,7 +62,7 @@ export interface VcmpSessionClientAuthentication {
 	 * {@link computeRefreshDelay}.
 	 */
 	refreshLeadTime?: number | ((expiresIn: number) => number);
-	/** Delay in milliseconds before retrying a failed refresh; retried only while before the expiry. */
+	/** Delay in milliseconds before retrying a refresh answered with NAK; retried only while before the expiry. */
 	refreshRetryDelay: number;
 }
 
@@ -72,6 +72,23 @@ export const DEFAULT_REFRESH_RETRY_DELAY = 5000;
 /** The default refresh lead time: `min(60 s, 20 % of expiresIn)`. */
 export function defaultRefreshLeadTime(expiresIn: number) {
 	return Math.min(60000, 0.2 * expiresIn);
+}
+
+/** The least answer timeout and refresh retry delay; smaller ones are rejected (not clamped). */
+export const MIN_AUTHENTICATION_INTERVAL = 1000;
+
+/** Rejects an answer timeout or refresh retry delay below {@link MIN_AUTHENTICATION_INTERVAL}. */
+export function validateClientAuthentication({timeout, refreshRetryDelay}: {
+	timeout: number;
+	refreshRetryDelay: number;
+}) {
+	for (
+		const [name, value] of [["authenticationTimeout", timeout], ["refreshRetryDelay", refreshRetryDelay]] as const
+	) {
+		if (!(Number.isFinite(value) && value >= MIN_AUTHENTICATION_INTERVAL)) {
+			throw new RangeError(`${name} must be at least ${MIN_AUTHENTICATION_INTERVAL} ms, was ${value}.`);
+		}
+	}
 }
 
 /** A refresh is never sent sooner than this after the ACK that scheduled it. */

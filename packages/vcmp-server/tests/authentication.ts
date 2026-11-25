@@ -682,6 +682,97 @@ describe("VcmpServer authentication", function() {
 			expect(logged.join("\n")).to.not.contain("s3cr3t");
 		});
 
+		describe("an expiry that is already over", () => {
+			it("rejects a first AUT with NAK 401 and closes", async () => {
+				harness = await startServer({
+					authenticate: () => ({principal: {user: "alice"}, expiresAt: new Date(Date.now() - 1)}),
+				});
+				const peer = await connect();
+				peer.aut("auth00000001", {token: "x"});
+				expect(JSON.parse(await peer.expectFrame("NAKauth00000001")).status).to.equal(401);
+				expect(await peer.expectClose()).to.deep.equal({code: 1008, reason: "authentication failed"});
+				expect(harness.events).to.deep.equal([]);
+			});
+
+			it("rejects an expiry of exactly now", async () => {
+				harness = await startServer({
+					authenticate: () => ({principal: {user: "alice"}, expiresAt: new Date()}),
+				});
+				const peer = await connect();
+				peer.aut("auth00000001", {token: "x"});
+				expect(JSON.parse(await peer.expectFrame("NAKauth00000001")).status).to.equal(401);
+				expect((await peer.expectClose()).code).to.equal(1008);
+			});
+
+			it("rejects a refresh with NAK 401, the session stays until the old expiry", async () => {
+				let calls = 0;
+				harness = await startServer({
+					authenticate: () => ({
+						principal: {user: "alice"},
+						expiresAt: new Date(Date.now() + (calls++ == 0 ? 300 : -1)),
+					}),
+				});
+				const peer = await connect();
+				const start = Date.now();
+				peer.aut("auth00000001", {token: "x"});
+				await peer.expectFrame("ACKauth00000001");
+				peer.aut("auth00000002", {token: "x"});
+				expect(JSON.parse(await peer.expectFrame("NAKauth00000002")).status).to.equal(401);
+				peer.msg("msg000000001", {"@type": "echo"});
+				await peer.expectFrame("ACKmsg000000001");
+				expect(await peer.expectClose()).to.deep.equal({code: 1008, reason: "authentication expired"});
+				expect(Date.now() - start).to.be.within(280, 800);
+			});
+
+			it("closes a session whose handshake authentication has expired", async () => {
+				harness = await startServer({
+					authenticateHandshake: () => ({principal: {user: "old"}, expiresAt: new Date(Date.now() - 1)}),
+				});
+				const peer = await connect();
+				expect(await peer.expectClose()).to.deep.equal({code: 1008, reason: "authentication failed"});
+				expect(harness.events).to.deep.equal([]);
+				expect(harness.server.authenticationCounts).to.deep.equal({handshake: 0, aut: 0});
+			});
+		});
+
+		describe("unparseable frames", () => {
+			for (const [name, frame] of [["an unknown frame type", "XYZgarbage"], ["an empty frame", ""]] as const) {
+				it(`closes on ${name} before authentication`, async () => {
+					harness = await startServer({});
+					const peer = await connect();
+					peer.send(frame);
+					expect(await peer.expectClose()).to.deep.equal({code: 1008, reason: "authentication required"});
+				});
+			}
+
+			it("closes on a binary frame before authentication", async () => {
+				harness = await startServer({});
+				const peer = await connect();
+				peer.webSocket.send(Buffer.from("MSGmsg000000001{}"));
+				expect(await peer.expectClose()).to.deep.equal({code: 1008, reason: "authentication required"});
+			});
+
+			it("drops and logs an unparseable frame after authentication", async () => {
+				harness = await startServer({});
+				const peer = await connect();
+				peer.aut("auth00000001", {token: "valid:alice"});
+				await peer.expectFrame("ACKauth00000001");
+				peer.send("XYZgarbage");
+				peer.msg("msg000000001", {"@type": "echo"});
+				await peer.expectFrame("ACKmsg000000001");
+				await peer.expectOpenFor(50);
+			});
+
+			it("drops and logs an unparseable frame on an endpoint without authentication", async () => {
+				harness = await startServer();
+				const peer = await connect();
+				peer.send("XYZgarbage");
+				peer.msg("msg000000001", {"@type": "echo"});
+				await peer.expectFrame("ACKmsg000000001");
+				await peer.expectOpenFor(50);
+			});
+		});
+
 		it("reserves expiresIn in the ACK payload", async () => {
 			harness = await startServer({
 				authenticate: () => ({principal: {user: "alice"}, ack: {expiresIn: 1, role: "admin"}}),

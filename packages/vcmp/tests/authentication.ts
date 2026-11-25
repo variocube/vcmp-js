@@ -205,7 +205,7 @@ describe("VcmpClient authentication", function() {
 		const errors: VcmpError[] = [];
 		const client = createClient({
 			authenticate: async () => ({token: "t"}),
-			authenticationTimeout: 50,
+			authenticationTimeout: 1000,
 			reconnectTimeout: 1000,
 		});
 		client.onAuthenticationError = error => errors.push(error);
@@ -238,6 +238,89 @@ describe("VcmpClient authentication", function() {
 		await closed;
 		expect(errors.map(error => error.status)).to.deep.equal([500]);
 		expect(server.auts()).to.have.length(0);
+		await waitFor(() => server.connections[0]?.closed !== undefined);
+		expect(server.connections[0].closed).to.deep.equal({code: 4008, reason: "authentication failed"});
+	});
+
+	it("times out a credential provider that never completes, closes and reconnects", async () => {
+		let calls = 0;
+		const errors: VcmpError[] = [];
+		const client = createClient({
+			authenticate: () => ++calls == 1 ? new Promise<object>(() => {}) : Promise.resolve({token: "t"}),
+			authenticationTimeout: 1000,
+		});
+		client.onAuthenticationError = error => errors.push(error);
+		const opened = new Promise<void>(resolve => client.onOpen = () => resolve());
+		const start = Date.now();
+		client.start();
+		await opened;
+		expect(Date.now() - start).to.be.within(950, 2000);
+		expect(errors.map(error => error.status)).to.deep.equal([504]);
+		expect(server.connections[0].closed).to.deep.equal({code: 4008, reason: "authentication timeout"});
+		expect(server.auts(server.connections[0])).to.have.length(0);
+		expect(calls).to.equal(2);
+	});
+
+	it("closes the session when the credential provider fails on a refresh", async () => {
+		server.onAut = () => `ACK{"expiresIn":2000}`;
+		let calls = 0;
+		const errors: VcmpError[] = [];
+		const client = createClient({
+			authenticate: async () => {
+				if (++calls == 2) {
+					throw new Error("no token");
+				}
+				return {token: "t"};
+			},
+			reconnectTimeout: 5000,
+		});
+		client.onAuthenticationError = error => errors.push(error);
+		client.start();
+		await waitFor(() => server.connections[0]?.closed !== undefined, 3000);
+		expect(server.connections[0].closed).to.deep.equal({code: 4008, reason: "authentication failed"});
+		expect(errors.map(error => error.status)).to.deep.equal([500]);
+		expect(server.auts(server.connections[0])).to.have.length(1);
+	});
+
+	it("rejects an answer timeout or refresh retry delay below 1 s at construction", () => {
+		const authenticate = async () => ({token: "t"});
+		expect(() => new VcmpClient("ws://test", {authenticate, authenticationTimeout: 999})).to.throw(RangeError);
+		expect(() => new VcmpClient("ws://test", {authenticate, refreshRetryDelay: 500})).to.throw(RangeError);
+		expect(() => new VcmpClient("ws://test", {authenticate, authenticationTimeout: NaN})).to.throw(RangeError);
+		expect(() => new VcmpClient("ws://test", {authenticate, authenticationTimeout: 1000, refreshRetryDelay: 1000}))
+			.to.not.throw();
+	});
+
+	describe("a malformed ACK", () => {
+		for (
+			const [name, payload, expected] of [
+				["a payload that is not an object", "[1]", {}],
+				["a string payload", "\"ok\"", {}],
+				["an unparseable payload", "{oops", {}],
+				["a negative expiresIn", "{\"expiresIn\":-5,\"user\":\"a\"}", {user: "a"}],
+				["a fractional expiresIn", "{\"expiresIn\":1.5}", {}],
+				["a string expiresIn", "{\"expiresIn\":\"2000\"}", {}],
+			] as const
+		) {
+			it(`counts ${name} as absent, warns and authenticates`, async () => {
+				server.onAut = () => `ACK${payload}`;
+				const warnings: string[] = [];
+				const collect = (...data: any[]) => warnings.push(data.map(String).join(" "));
+				const client = createClient({
+					authenticate: async () => ({token: "t"}),
+					debug: {info: () => {}, debug: () => {}, warn: collect, error: collect},
+				});
+				const opened = new Promise<void>(resolve => client.onOpen = () => resolve());
+				client.start();
+				await opened;
+				expect(client.connected).to.be.true;
+				expect(client.authentication).to.deep.equal(expected);
+				expect(warnings.some(warning => /ACK payload|expiresIn/.test(warning))).to.be.true;
+				// no refresh is scheduled from an invalid expiresIn
+				await sleep(1100);
+				expect(server.auts()).to.have.length(1);
+			});
+		}
 	});
 
 	it("re-authenticates at the lead time before the expiry, without holding messages", async () => {
@@ -315,19 +398,19 @@ describe("VcmpClient authentication", function() {
 
 	it("retries a refresh answered with NAK 401 until the expiry", async () => {
 		server.onAut = (credential, connection) =>
-			server.auts(connection).length == 1 ? `ACK{"expiresIn":1600}` : `NAK{"title":"Invalid","status":401}`;
+			server.auts(connection).length == 1 ? `ACK{"expiresIn":3500}` : `NAK{"title":"Invalid","status":401}`;
 		const errors: number[] = [];
 		const client = createClient({
 			authenticate: async () => ({token: "t"}),
-			refreshLeadTime: 600,
-			refreshRetryDelay: 100,
+			refreshLeadTime: 1500,
+			refreshRetryDelay: 1000,
 		});
 		client.onAuthenticationError = error => errors.push(error.status);
 		client.start();
-		await sleep(1900);
-		// refresh at 1000 ms, retries every 100 ms while before the expiry at 1600 ms
+		await sleep(3800);
+		// refresh at 2000 ms, retried at 3000 ms; not at 4000 ms, past the expiry at 3500 ms
 		const auts = server.auts().length;
-		expect(auts).to.be.within(5, 8);
+		expect(auts).to.equal(3);
 		expect(errors.every(status => status == 401)).to.be.true;
 		expect(errors).to.have.length(auts - 1);
 		// the session stays open (the server would close it at the expiry)
@@ -337,17 +420,17 @@ describe("VcmpClient authentication", function() {
 	it("retries a refresh answered with NAK 403 until the expiry", async () => {
 		// a 403 without a principal change: the server keeps the session until its old expiry
 		server.onAut = (credential, connection) =>
-			server.auts(connection).length == 1 ? `ACK{"expiresIn":1600}` : `NAK{"title":"Forbidden","status":403}`;
+			server.auts(connection).length == 1 ? `ACK{"expiresIn":3500}` : `NAK{"title":"Forbidden","status":403}`;
 		const errors: number[] = [];
 		const client = createClient({
 			authenticate: async () => ({token: "t"}),
-			refreshLeadTime: 600,
-			refreshRetryDelay: 100,
+			refreshLeadTime: 1500,
+			refreshRetryDelay: 1000,
 		});
 		client.onAuthenticationError = error => errors.push(error.status);
 		client.start();
-		await sleep(1900);
-		expect(server.auts().length).to.be.within(5, 8);
+		await sleep(3800);
+		expect(server.auts().length).to.equal(3);
 		expect(errors.every(status => status == 403)).to.be.true;
 		expect(server.connections).to.have.length(1);
 	});
@@ -359,15 +442,14 @@ describe("VcmpClient authentication", function() {
 		let calls = 0;
 		const client = createClient({
 			authenticate: async () => ({token: `t${++calls}`}),
-			authenticationTimeout: 50,
+			authenticationTimeout: 1000,
 			refreshLeadTime: 1900,
-			refreshRetryDelay: 10,
 		});
 		client.onAuthenticationError = error => errors.push(error.status);
 		let closes = 0;
 		client.onClose = () => closes++;
 		client.start();
-		await waitFor(() => server.connections.length == 2 && server.auts(server.connections[1]).length == 1, 3000);
+		await waitFor(() => server.connections.length == 2 && server.auts(server.connections[1]).length == 1, 5000);
 		const first = server.connections[0];
 		await waitFor(() => first.closed !== undefined);
 		// the refresh was sent once, never retried on the session that may still be processing it
@@ -411,7 +493,7 @@ describe("VcmpClient authentication", function() {
 		const client = new VcmpClient("ws://test", {
 			customWebSocket: SyncAckWebSocket as any,
 			authenticate: () => ({token: "t"}),
-			authenticationTimeout: 30,
+			authenticationTimeout: 1000,
 			initialHeartbeatTimeout: 0,
 		});
 		client.onAuthenticationError = error => errors.push(error);
@@ -420,7 +502,7 @@ describe("VcmpClient authentication", function() {
 		client.start();
 		SyncAckWebSocket.instances[0].open();
 		await waitFor(() => opens == 1);
-		await sleep(80);
+		await sleep(1100);
 		expect(errors).to.deep.equal([]);
 		expect(client.connected).to.be.true;
 		client.stop();

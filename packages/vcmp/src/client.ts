@@ -1,6 +1,7 @@
 import {
 	DEFAULT_AUTHENTICATION_TIMEOUT,
 	DEFAULT_REFRESH_RETRY_DELAY,
+	validateClientAuthentication,
 	VcmpAuthenticatedEvent,
 	VcmpAuthenticationAck,
 } from "./authentication";
@@ -35,8 +36,9 @@ export interface Options {
 	 */
 	authenticate?: () => Promise<object> | object;
 	/**
-	 * Time in milliseconds within which the server must answer an `AUT`; otherwise the authentication
-	 * fails (status 504) and the session is closed and reconnected. Default: 10000.
+	 * Time in milliseconds, from requesting the credential, within which the credential must be provided and
+	 * the server must answer the `AUT`; otherwise the authentication fails (status 504) and the session is
+	 * closed and reconnected. At least 1000 (smaller values are rejected). Default: 10000.
 	 */
 	authenticationTimeout: number;
 	/**
@@ -47,10 +49,10 @@ export interface Options {
 	 */
 	refreshLeadTime?: number | ((expiresIn: number) => number);
 	/**
-	 * Delay in milliseconds before a failed re-authentication (a `NAK`, or a failing credential provider) is
-	 * retried; retries stop at the expiry, when the server closes the session. A re-authentication the server
-	 * doesn't answer within `authenticationTimeout` is not retried: the session is closed and reconnected.
-	 * Default: 5000.
+	 * Delay in milliseconds before a re-authentication answered with `NAK` is retried; retries stop at the
+	 * expiry, when the server closes the session. A re-authentication without an answer within
+	 * `authenticationTimeout`, or whose credential provider fails, is not retried: the session is closed (4008)
+	 * and reconnected. At least 1000 (smaller values are rejected). Default: 5000.
 	 */
 	refreshRetryDelay: number;
 }
@@ -97,6 +99,13 @@ export class VcmpClient {
 			...defaultOptions,
 			...options,
 		};
+
+		if (this.options.authenticate) {
+			validateClientAuthentication({
+				timeout: this.options.authenticationTimeout,
+				refreshRetryDelay: this.options.refreshRetryDelay,
+			});
+		}
 
 		this.debug(`Constructed VcmpClient for URL ${this.url} and the following options`, this.options);
 
