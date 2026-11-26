@@ -22,7 +22,11 @@ export interface VcmpWebSocket {
 
 	send(data: string): void;
 
-	close(): void;
+	/**
+	 * Starts the close handshake. The library passes a code and reason only when it closes a session
+	 * for a policy violation (`1008`, e.g. a failed or expired authentication).
+	 */
+	close(code?: number, reason?: string): void;
 
 	/**
 	 * Destroys the connection immediately, without the close handshake. Optional: Node's `ws`

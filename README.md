@@ -103,3 +103,164 @@ handler ran. Use an idempotent retry if the operation must be applied exactly on
 **Upgrade note (breaking):** sends that previously could stay pending forever now reject. Audit
 fire-and-forget `send(...)` call sites and attach `.catch(...)`, otherwise these rejections are
 unhandled promise rejections.
+
+## Session authentication (`AUT`)
+
+Browsers can't set headers on a WebSocket handshake, so a credential would otherwise have to go into the
+URL, where it ends up in access logs, proxies and CDNs. VCMP authenticates a session in-band instead,
+with an `AUT` frame (specified in [vcmp-spring#34](https://github.com/variocube/vcmp-spring/issues/34) and
+implemented wire-compatibly by vcmp-spring, vcmp-js and vcmp-rs).
+
+### Protocol
+
+| Frame | Layout                           | Meaning                                                                                                     |
+| ----- | -------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `AUT` | `AUT` + 12-char id + JSON object | Client → server: authenticate this session. The endpoint defines the object's shape, e.g. `{"token": "…"}`. |
+
+- The server answers with `ACK` + id, or `NAK` + id with a problem detail: `400` malformed (or an `AUT`
+  on an endpoint without authentication), `401` invalid credential, `403` valid but not allowed
+  (incl. a different principal on re-authentication), `500` the authenticator failed unexpectedly.
+- The `ACK` payload is a JSON object or empty. Its member `expiresIn` (integer, milliseconds from sending
+  the `ACK`) is reserved by the protocol: the session's authentication expires then (absent: never). Any
+  other member is the endpoint's own and is passed to the client application.
+- Until a session is authenticated, the server accepts only `HBT` and `AUT`. Every session a server closes
+  for an authentication reason is closed with code **1008** (policy violation); a client closes with
+  **4008** instead (a browser's WebSocket only lets a client close with 1000 or 3000–4999), which peers
+  treat like 1008. Both give an informative reason:
+  `authentication required` (a frame other than `HBT`/`AUT` first, including one that can't be parsed), `authentication timeout` (no
+  successful `AUT` within the timeout, default 10 s from connect until the first `ACK` is sent, so it
+  also covers a hanging authenticator), `authentication failed` (`NAK` to the first `AUT`),
+  `authentication expired`, `principal changed`, `concurrent authentication` (a second `AUT` while one is
+  pending).
+- An `AUT` on an authenticated session is a **re-authentication**; messages keep flowing meanwhile. Same
+  principal → `ACK` with the new `expiresIn` (the expiry is replaced, or removed). Another principal →
+  `NAK` 403 and the session closes: a session never changes identity. Any other failure (`NAK` 400, 401,
+  403 or 500) keeps the session open until its current expiry.
+- An authentication whose expiry is already over (not in the future) is a rejected credential: `NAK` 401
+  (a handshake credential: closed with 1008).
+- A session is authenticated only once its `ACK` is out: a failure after the authenticator accepted (no
+  principal, the principal comparison throws, the `ACK` payload can't be serialized) is answered with
+  `NAK` 500 and fails closed like an authenticator failure.
+- An `AUT` is not a message: it is never dispatched to message handlers, and its payload (the
+  credential) is never written to debug output (`AUT<id>[redacted]`), nor are errors that would quote it.
+  Exceptions of the application's authenticator are logged by type and message: keep credentials out of
+  them. `wss://` is still required for anything secret.
+
+### Client
+
+```typescript
+const client = new VcmpClient("wss://example.com/vcmp", {
+	autoStart: true,
+	authenticate: async () => ({token: keycloak.token}),
+});
+client.onOpen = () => console.log("Authenticated, ready to send");
+client.onAuthenticated = ack => console.log("Authenticated as", ack.user, "expires in", ack.expiresIn);
+client.onAuthenticationError = error => console.warn("Authentication failed", error.status, error.title);
+
+// the application re-authenticates whenever its token was refreshed
+keycloak.onAuthRefreshSuccess = () => {
+	client.reauthenticate().catch(() => {/* already reported via onAuthenticationError */});
+};
+```
+
+- `authenticate` is called on **every** (re)connect and on every `reauthenticate()`, so it can return a
+  fresh credential. The client sends `AUT` first and holds back every message sent meanwhile until the
+  `ACK`. `onOpen` is raised, and `connected` becomes `true`, only after the `ACK`; `client.authentication`
+  holds its payload.
+- A `NAK`, no answer within `authenticationTimeout` (default 10 s, at least 1 s — a smaller value throws a
+  `RangeError` at construction; e.g. an older server that doesn't know `AUT`) or a failing credential
+  provider is reported to `onAuthenticationError` (the `NAK`'s problem detail; 504 for the timeout; 500 for
+  the provider). The client then closes the session with 4008 — reason `authentication failed` after a
+  `NAK` or a failed provider, `authentication timeout` without an answer — and reconnects after
+  `reconnectTimeout` with a fresh credential. Held messages are rejected (503). The answer timeout starts
+  when the credential is requested, so a provider that never completes ends like an unanswered `AUT`.
+- If the session closes while an `AUT` is pending (e.g. an older server that closes on the unknown frame),
+  `onAuthenticationError` is raised with 503 "Session closed" before `onClose`, and the client reconnects
+  as after any close. Not after `client.stop()`: a deliberate stop reports nothing (a pending
+  `reauthenticate()` still rejects with 503).
+- **The application triggers re-authentication; the client schedules nothing.** `onAuthenticated` passes
+  each `ACK` payload, including `expiresIn`, but the client sets no timer from it. An application with an
+  expiring credential (keycloak-js, oidc-client, …) calls `reauthenticate()` whenever its token was
+  refreshed. One that never does loses the session at the expiry (the server closes it), and the client
+  reconnects with a fresh credential, as after any close.
+- `reauthenticate(): Promise<VcmpAuthenticationAck | undefined>` asks `authenticate` and sends one `AUT` on
+  the open session. It resolves with the `ACK` payload, or rejects with the authentication error, which is
+  also reported via `onAuthenticationError` (attach a rejection handler):
+  - `NAK` (any status): the session stays (the server keeps it until its current expiry); no automatic
+    retry — call again if wanted. On a principal change (403) the server closes the session.
+  - The provider fails or doesn't complete within `authenticationTimeout`: nothing is sent, the session
+    stays (its current authentication is still valid).
+  - A sent `AUT` without an answer within `authenticationTimeout`: rejects (504), the client closes the
+    session (4008, `authentication timeout`) and reconnects; a second `AUT` while the first is pending would
+    make the server close it anyway. If the session closes while the `AUT` is pending, it rejects (503, also reported — not after `stop()`, where only the promise rejects);
+    if the `AUT` can't be handed to the socket, it rejects (503) and the client closes the session (4008,
+    `authentication failed`) and reconnects.
+  - Only one `AUT` is in flight: calls while one is pending (the first `AUT` or a re-authentication) are
+    served together by a single further `AUT` after the pending answer, with a fresh credential (or by the
+    one an `onAuthenticated`/`onAuthenticationError`/`onOpen` handler started meanwhile).
+  - Without an authenticated session (no `authenticate` option, connecting, disconnected, or a first `AUT`
+    that fails while the call waits), nothing is sent and it resolves with `undefined`: the next connect
+    asks the provider anyway.
+- A malformed `ACK` is tolerated with a warning: a payload that isn't a JSON object counts as no payload,
+  an `expiresIn` that isn't a non-negative integer as absent (the server decides about expiry).
+
+Without `authenticate`, the client behaves exactly as before.
+
+### Server
+
+```typescript
+const server = new VcmpServer<{ userId: string }>({
+	port: 12345,
+	authentication: {
+		// return the principal (optionally with an expiry and ACK members), or throw to reject
+		authenticate: async ({token}, session) => {
+			const claims = await verify(token); // throws VcmpError {status: 401} when invalid
+			return {principal: {userId: claims.sub}, expiresAt: new Date(claims.exp * 1000)};
+		},
+		timeout: 10000, // optional
+	},
+});
+server.onSessionConnected = session => console.log("Connected:", session.principal?.userId);
+```
+
+- The authenticator gets the credential and the session, and must return a principal (`undefined` or
+  `null` is answered with `NAK` 500). A thrown `VcmpError` (or problem detail) with
+  status 400, 401 or 403 is answered with that status; anything else is an unexpected failure, answered
+  with `NAK` 500 without its message. Either way, a failed first `AUT` closes the session, a failed
+  re-authentication keeps it until its current expiry.
+  Its `ack` members go into the `ACK` payload (`expiresIn` is set by the library from `expiresAt`).
+- `onSessionConnected` is raised only once the session authenticated, `onSessionDisconnected` only for
+  sessions that were connected; `sessions` and `broadcast` contain authenticated sessions only, and a
+  session refuses `send` (503) until it is authenticated. `session.principal` holds the principal.
+- Re-authentications must carry the same principal, compared with `principalEquals` (default: deep
+  equality).
+
+Without `authentication`, the server behaves exactly as before, except that it answers an `AUT` with
+`NAK` 400.
+
+#### Transition: old clients with a handshake credential
+
+An endpoint that switches to `AUT` may still have clients that send their credential in the handshake
+(query parameter, path, header). For the migration, add a handshake authenticator, which gets the
+handshake request:
+
+```typescript
+authentication: {
+	authenticate,
+	authenticateHandshake: (request, session) => {
+		const token = new URL(request.url!, "http://localhost").searchParams.get("token");
+		if (token == null) {
+			return undefined; // no handshake credential: the session must send AUT
+		}
+		return verifyLegacyToken(token); // throws when invalid: the session is closed (1008)
+	},
+},
+```
+
+- A valid handshake credential authenticates the session at connect, as before (no `AUT` expected); an
+  invalid one closes it (1008), without a fallback to `AUT`; none means the session waits for `AUT`.
+- An `AUT` on a session authenticated by its handshake is a re-authentication (same principal required).
+- The handshake authenticator may be asynchronous; frames arriving meanwhile are held back.
+- `server.authenticationCounts` (`{handshake, aut}`) counts the sessions authenticated each way, and every
+  authentication is logged (`debug.info`), so the endpoint knows when the last old client is gone and the
+  handshake authenticator can be removed.

@@ -1,3 +1,9 @@
+import {
+	DEFAULT_AUTHENTICATION_TIMEOUT,
+	validateAuthenticationTimeout,
+	VcmpAuthenticatedEvent,
+	VcmpAuthenticationAck,
+} from "./authentication";
 import {VcmpError} from "./error";
 import {VcmpSession} from "./session";
 import {CloseHandler, ConsoleLike, OpenHandler, VcmpHandler, VcmpMessage} from "./types";
@@ -20,12 +26,27 @@ export interface Options {
 	 */
 	customWebSocket?: VcmpWebSocketConstructor;
 	debug?: ConsoleLike;
+	/**
+	 * Authenticates every session with an `AUT` frame (VCMP session authentication): called on every
+	 * (re)connect and on every `reauthenticate()`, it provides the credential, a JSON object whose shape the
+	 * endpoint defines (e.g. `{token: "…"}`). With it set, `onOpen` is raised and `connected`
+	 * becomes `true` only once the server acknowledged the authentication; messages sent before are held
+	 * back until then. Failures are reported via `onAuthenticationError`.
+	 */
+	authenticate?: () => Promise<object> | object;
+	/**
+	 * Time in milliseconds, from requesting the credential, within which the credential must be provided and
+	 * the server must answer the `AUT`; otherwise the authentication fails (status 504) and the session is
+	 * closed and reconnected. At least 1000 (smaller values are rejected). Default: 10000.
+	 */
+	authenticationTimeout: number;
 }
 
 const defaultOptions: Options = {
 	reconnectTimeout: 10000,
 	autoStart: false,
 	initialHeartbeatTimeout: 60000,
+	authenticationTimeout: DEFAULT_AUTHENTICATION_TIMEOUT,
 };
 
 export class VcmpClient {
@@ -40,8 +61,23 @@ export class VcmpClient {
 
 	private handler = new Map<string, VcmpHandler<any>>();
 
+	/** Raised when a session is ready: on open or, with `authenticate` set, on the first `ACK` to an `AUT`. */
 	public onOpen?: OpenHandler;
 	public onClose?: CloseHandler;
+	/**
+	 * Raised on every `ACK` to an `AUT` (first and re-authentications) with its payload: `expiresIn` and the
+	 * endpoint's own members. For the first one, it is raised before `onOpen`. The client sets no timer from
+	 * `expiresIn`: re-authenticating before it is the application's call (`reauthenticate()`).
+	 */
+	public onAuthenticated?: (ack: VcmpAuthenticationAck) => void;
+	/**
+	 * Raised when an authentication fails: a `NAK` (the server's problem detail), no answer within
+	 * `authenticationTimeout` (status 504), a failing credential provider (status 500), or the session closing
+	 * while an `AUT` is pending (status 503, raised before `onClose`; not after `stop()`). A failed first
+	 * authentication closes the session, which reconnects after `reconnectTimeout`; for a re-authentication see
+	 * `reauthenticate()`.
+	 */
+	public onAuthenticationError?: (error: VcmpError) => void;
 
 	constructor(url: string, options?: Partial<Options>) {
 		this.url = url;
@@ -50,6 +86,10 @@ export class VcmpClient {
 			...defaultOptions,
 			...options,
 		};
+
+		if (this.options.authenticate) {
+			validateAuthenticationTimeout(this.options.authenticationTimeout);
+		}
 
 		this.debug(`Constructed VcmpClient for URL ${this.url} and the following options`, this.options);
 
@@ -95,6 +135,8 @@ export class VcmpClient {
 			// the application's onOpen/onClose nor by scheduling a reconnect.
 			this.session = undefined;
 			session.onOpen = undefined;
+			session.onAuthenticated = undefined;
+			session.onAuthenticationError = undefined;
 			// When a replacement follows (start()), suppress the close notification
 			// entirely; otherwise (stop()) notify unless a new session appeared since.
 			session.onClose = replacing ? undefined : () => {
@@ -107,7 +149,42 @@ export class VcmpClient {
 	}
 
 	get connected() {
-		return this.session?.isOpen;
+		const session = this.session;
+		return session?.isOpen && (!this.options.authenticate || session.isAuthenticated);
+	}
+
+	/**
+	 * Re-authenticates the current session: asks `authenticate` for a fresh credential and sends one `AUT`. Call
+	 * it when the application's credential was refreshed (e.g. from keycloak-js `onAuthRefreshSuccess`); the
+	 * client schedules no re-authentication itself, and a session whose authentication expires is closed by the
+	 * server and reconnected.
+	 *
+	 * Resolves with the `ACK` payload (incl. `expiresIn`), or rejects with the authentication error, which is
+	 * also raised via `onAuthenticationError` — attach a rejection handler:
+	 * - `NAK` (any status): the session stays, no retry (call again if wanted).
+	 * - The credential provider fails or doesn't complete within `authenticationTimeout`: nothing is sent, the
+	 *   session stays.
+	 * - A sent `AUT` without an answer within `authenticationTimeout`: rejects (504), the session is closed
+	 *   (4008) and reconnected.
+	 * - The `AUT` can't be handed to the socket: rejects (503), the session is closed (4008, `authentication
+	 *   failed`) and reconnected.
+	 * - The session closes while the `AUT` is pending: rejects (503), also reported via `onAuthenticationError`
+	 *   except after `stop()`.
+	 *
+	 * Calls while an `AUT` is pending (the first one or a re-authentication) are served by a single further
+	 * `AUT` after its answer. Without an authenticated session (no `authenticate` option, connecting,
+	 * disconnected, or a first `AUT` that failed), nothing is sent and it resolves with `undefined`.
+	 */
+	reauthenticate(): Promise<VcmpAuthenticationAck | undefined> {
+		if (!this.options.authenticate || !this.session) {
+			return Promise.resolve(undefined);
+		}
+		return this.session.reauthenticate();
+	}
+
+	/** The payload of the current session's last `ACK` to an `AUT`, if it authenticated. */
+	get authentication() {
+		return this.session?.authentication;
 	}
 
 	send<T extends VcmpMessage>(message: T) {
@@ -139,16 +216,22 @@ export class VcmpClient {
 			this.debug("Constructing websocket");
 			const webSocket = new webSocketConstructor(this.url);
 			this.debug("Connecting handlers");
+			const {authenticate, authenticationTimeout} = this.options;
 			const session = new VcmpSession({
 				webSocket,
 				resolver: type => this.handler.get(type),
 				debug: this.options.debug,
+				clientAuthentication: authenticate
+					? {authenticate, timeout: authenticationTimeout}
+					: undefined,
 			});
 			this.session = session;
 			// Capture the session: an event may arrive after this session has been
 			// replaced, and must not affect the session that replaced it.
 			session.onOpen = () => this.handleSessionOpen(session);
 			session.onClose = () => this.handleSessionClose(session);
+			session.onAuthenticated = event => this.handleSessionAuthenticated(session, event);
+			session.onAuthenticationError = error => this.handleSessionAuthenticationError(session, error);
 		}
 		else {
 			this.debug("Not running, ignoring call to initiateConnection");
@@ -187,7 +270,28 @@ export class VcmpClient {
 		if (this.options.initialHeartbeatTimeout > 0) {
 			session.expectHeartbeat(this.options.initialHeartbeatTimeout);
 		}
-		this.onOpen && this.onOpen();
+		// With authentication, the session is ready only once the server acknowledged it
+		if (!this.options.authenticate) {
+			this.onOpen && this.onOpen();
+		}
+	}
+
+	private handleSessionAuthenticated(session: VcmpSession, event: VcmpAuthenticatedEvent) {
+		if (this.session !== session) {
+			return;
+		}
+		this.debug(event.reauthentication ? "VCMP session re-authenticated" : "VCMP session authenticated");
+		this.onAuthenticated && this.onAuthenticated(event.ack);
+		if (!event.reauthentication && this.session === session) {
+			this.onOpen && this.onOpen();
+		}
+	}
+
+	private handleSessionAuthenticationError(session: VcmpSession, error: VcmpError) {
+		if (this.session !== session) {
+			return;
+		}
+		this.onAuthenticationError && this.onAuthenticationError(error);
 	}
 
 	private handleSessionClose(session: VcmpSession) {

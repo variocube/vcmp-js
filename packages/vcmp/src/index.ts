@@ -1,3 +1,4 @@
+export * from "./authentication";
 export * from "./client";
 export * from "./error";
 export * from "./frame";
