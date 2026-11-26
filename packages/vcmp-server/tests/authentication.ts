@@ -931,33 +931,85 @@ describe("VcmpServer authentication", function() {
 	});
 
 	describe("with VcmpClient", () => {
-		it("authenticates, refreshes before the expiry and exchanges messages", async () => {
-			const credentials: string[] = [];
-			harness = await startServer({});
-			harness.server.on("whoami", (message, session) => (session as VcmpSession<Principal>).principal?.user);
-			const client = new VcmpClient(harness.url, {
+		/** A VcmpClient whose credential is whatever `token.value` holds when the provider is asked. */
+		async function startClient(token: { value: string }, options: Record<string, unknown> = {}) {
+			const client = new VcmpClient(harness!.url, {
 				customWebSocket: NodeWebSocket,
-				authenticate: async () => {
-					credentials.push("valid:alice:1500");
-					return {token: "valid:alice:1500"};
-				},
-				refreshLeadTime: 100,
+				authenticate: async () => ({token: token.value}),
+				reconnectTimeout: 50,
+				...options,
 			});
-			const acks: unknown[] = [];
-			client.onAuthenticated = ack => acks.push(ack);
 			const opened = new Promise<void>(resolve => client.onOpen = () => resolve());
 			client.start();
 			await opened;
-			expect(client.connected).to.be.true;
-			expect(client.authentication).to.include({user: "alice"});
+			return client;
+		}
+
+		it("7: the application's re-authentications keep the session past several expiries", async () => {
+			harness = await startServer({});
+			harness.server.on("whoami", (message, session) => (session as VcmpSession<Principal>).principal?.user);
+			const token = {value: "valid:alice:500"};
+			const client = await startClient(token);
+			expect(client.authentication).to.deep.equal({user: "alice", expiresIn: client.authentication?.expiresIn});
 			expect(await client.send({"@type": "whoami"})).to.equal("alice");
-			// survives several expiries thanks to the refresh
-			await sleep(3200);
+			for (let i = 0; i < 3; i++) {
+				await sleep(300);
+				const ack = await client.reauthenticate();
+				expect(ack?.expiresIn).to.be.within(400, 500);
+			}
+			// 1.2 s in, past the first expiry (500 ms) and the second
 			expect(client.connected).to.be.true;
 			expect(await client.send({"@type": "whoami"})).to.equal("alice");
-			expect(credentials.length).to.be.at.least(3);
-			expect(acks.length).to.equal(credentials.length);
 			expect(harness.events).to.deep.equal(["connected:alice"]);
+			client.stop();
+		});
+
+		it("6: without re-authentication the server closes at the expiry and the client reconnects", async () => {
+			harness = await startServer({});
+			const token = {value: "valid:alice:300"};
+			const client = await startClient(token);
+			let opens = 0;
+			client.onOpen = () => opens++;
+			await waitFor(() => opens == 1, 2000);
+			expect(harness.events.slice(0, 3)).to.deep.equal([
+				"connected:alice",
+				"disconnected:alice",
+				"connected:alice",
+			]);
+			client.stop();
+		});
+
+		it("8: a re-authentication as another principal rejects with 403, the server closes and the client reconnects", async () => {
+			harness = await startServer({});
+			const token = {value: "valid:alice"};
+			const client = await startClient(token);
+			let opens = 0;
+			client.onOpen = () => opens++;
+			token.value = "valid:bob";
+			const error = await client.reauthenticate().then(() => undefined, error => error);
+			expect(error.status).to.equal(403);
+			await waitFor(() => opens == 1, 2000);
+			expect(harness.events.slice(0, 3)).to.deep.equal([
+				"connected:alice",
+				"disconnected:alice",
+				"connected:bob",
+			]);
+			client.stop();
+		});
+
+		it("9: a failed re-authentication rejects with 401, the session stays until the old expiry", async () => {
+			harness = await startServer({});
+			const token = {value: "valid:alice:600"};
+			const client = await startClient(token, {reconnectTimeout: 5000});
+			const start = Date.now();
+			const closed = new Promise<void>(resolve => client.onClose = () => resolve());
+			token.value = "expired";
+			const error = await client.reauthenticate().then(() => undefined, error => error);
+			expect(error.status).to.equal(401);
+			expect(client.connected).to.be.true;
+			await client.send({"@type": "echo"});
+			await closed;
+			expect(Date.now() - start).to.be.within(500, 1200);
 			client.stop();
 		});
 

@@ -20,7 +20,7 @@ export type VcmpAuthenticationSource = "handshake" | "aut";
 /** Raised on every successful authentication of a session, first or re-authentication. */
 export interface VcmpAuthenticatedEvent {
 	source: VcmpAuthenticationSource;
-	/** `false` for the authentication that makes the session usable, `true` for each refresh after it. */
+	/** `false` for the authentication that makes the session usable, `true` for each re-authentication after it. */
 	reauthentication: boolean;
 	/** The `ACK` payload (received by a client, sent by a server); empty for a handshake authentication. */
 	ack: VcmpAuthenticationAck;
@@ -52,72 +52,27 @@ export interface VcmpSessionServerAuthentication<P> {
 
 /** Client role of a session: the session authenticates with an `AUT` frame once its socket opens. */
 export interface VcmpSessionClientAuthentication {
-	/** Provides the credential; called on every connect and for every refresh. */
+	/** Provides the credential; called on every connect and on every `reauthenticate()`. */
 	authenticate(): Promise<object> | object;
-	/** Time in milliseconds, from requesting the credential, within which the server must answer the `AUT`. */
-	timeout: number;
 	/**
-	 * How long before the expiry the session re-authenticates, in milliseconds, either fixed or computed
-	 * from the `ACK`'s `expiresIn`. Default: `min(60 s, 20 % of expiresIn)`. Bounded, see
-	 * {@link computeRefreshDelay}.
+	 * Time in milliseconds, from requesting the credential, within which the credential must be provided and the
+	 * server must answer the `AUT`. At least {@link MIN_AUTHENTICATION_TIMEOUT}.
 	 */
-	refreshLeadTime?: number | ((expiresIn: number) => number);
-	/** Delay in milliseconds before retrying a refresh answered with NAK; retried only while before the expiry. */
-	refreshRetryDelay: number;
+	timeout: number;
 }
 
 export const DEFAULT_AUTHENTICATION_TIMEOUT = 10000;
-export const DEFAULT_REFRESH_RETRY_DELAY = 5000;
 
-/** The default refresh lead time: `min(60 s, 20 % of expiresIn)`. */
-export function defaultRefreshLeadTime(expiresIn: number) {
-	return Math.min(60000, 0.2 * expiresIn);
-}
+/** The least answer timeout; a smaller one is rejected (not clamped). */
+export const MIN_AUTHENTICATION_TIMEOUT = 1000;
 
-/** The least answer timeout and refresh retry delay; smaller ones are rejected (not clamped). */
-export const MIN_AUTHENTICATION_INTERVAL = 1000;
-
-/** Rejects an answer timeout or refresh retry delay below {@link MIN_AUTHENTICATION_INTERVAL}. */
-export function validateClientAuthentication({timeout, refreshRetryDelay}: {
-	timeout: number;
-	refreshRetryDelay: number;
-}) {
-	for (
-		const [name, value] of [["authenticationTimeout", timeout], ["refreshRetryDelay", refreshRetryDelay]] as const
-	) {
-		if (!(Number.isFinite(value) && value >= MIN_AUTHENTICATION_INTERVAL)) {
-			throw new RangeError(`${name} must be at least ${MIN_AUTHENTICATION_INTERVAL} ms, was ${value}.`);
-		}
+/** Rejects an answer timeout below {@link MIN_AUTHENTICATION_TIMEOUT} (or not a finite number). */
+export function validateAuthenticationTimeout(timeout: number) {
+	if (!(Number.isFinite(timeout) && timeout >= MIN_AUTHENTICATION_TIMEOUT)) {
+		throw new RangeError(
+			`authenticationTimeout must be at least ${MIN_AUTHENTICATION_TIMEOUT} ms, was ${timeout}.`,
+		);
 	}
-}
-
-/** A refresh is never sent sooner than this after the ACK that scheduled it. */
-export const MIN_REFRESH_DELAY = 1000;
-
-/**
- * The delay from receiving an ACK with `expiresIn` until the refresh: `expiresIn` minus the effective lead
- * time, `min(lead time, expiresIn / 2)` (the default lead time if the configured one isn't a finite number
- * ≥ 0, or its function throws), but at least {@link MIN_REFRESH_DELAY}, so that no lead time or tiny `expiresIn` causes a tight
- * refresh loop.
- */
-export function computeRefreshDelay(
-	expiresIn: number,
-	refreshLeadTime?: number | ((expiresIn: number) => number),
-) {
-	let configured: unknown = refreshLeadTime;
-	if (typeof refreshLeadTime == "function") {
-		try {
-			configured = refreshLeadTime(expiresIn);
-		}
-		catch {
-			// an application's function must not break the session: it runs from the socket's message event
-			configured = undefined;
-		}
-	}
-	const leadTime = typeof configured == "number" && Number.isFinite(configured) && configured >= 0
-		? configured
-		: defaultRefreshLeadTime(expiresIn);
-	return Math.max(MIN_REFRESH_DELAY, expiresIn - Math.min(leadTime, expiresIn / 2));
 }
 
 /** Close code of a session the server closes for an authentication reason (policy violation). */

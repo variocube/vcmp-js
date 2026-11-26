@@ -1,10 +1,4 @@
-import {
-	computeRefreshDelay,
-	defaultRefreshLeadTime,
-	VcmpAuthenticationAck,
-	VcmpClient,
-	VcmpError,
-} from "@variocube/vcmp";
+import {VcmpAuthenticationAck, VcmpClient, VcmpError, VcmpSession} from "@variocube/vcmp";
 import {expect} from "chai";
 import {AddressInfo} from "net";
 import WebSocket, {WebSocketServer} from "ws";
@@ -257,22 +251,22 @@ describe("VcmpClient authentication", function() {
 		expect(server.connections).to.have.length(2);
 	});
 
-	it("retries a refresh answered with NAK 503 until the expiry", async () => {
-		server.onAut = (credential, connection) =>
-			server.auts(connection).length == 1 ? `ACK{"expiresIn":3500}` : `NAK{"title":"Overloaded","status":503}`;
-		const errors: number[] = [];
-		const client = createClient({
-			authenticate: async () => ({token: "t"}),
-			refreshLeadTime: 1500,
-			refreshRetryDelay: 1000,
-		});
-		client.onAuthenticationError = error => errors.push(error.status);
+	it("reports an authentication error when the server closes while the first AUT is pending", async () => {
+		// e.g. an older server that closes the session on the unknown AUT
+		server.onAut = (credential, connection) => {
+			connection.webSocket.close();
+			return undefined;
+		};
+		const events: string[] = [];
+		const client = createClient({authenticate: async () => ({token: "t"}), reconnectTimeout: 5000});
+		client.onAuthenticationError = error => events.push(`error:${error.status}`);
+		client.onClose = () => events.push("close");
+		let opened = false;
+		client.onOpen = () => opened = true;
 		client.start();
-		await sleep(3800);
-		expect(server.auts()).to.have.length(3);
-		expect(errors).to.deep.equal([503, 503]);
-		expect(server.connections).to.have.length(1);
-		expect(client.connected).to.be.true;
+		await waitFor(() => events.includes("close"));
+		expect(events).to.deep.equal(["error:503", "close"]);
+		expect(opened).to.be.false;
 	});
 
 	it("reports a failing credential provider and closes the session", async () => {
@@ -312,34 +306,11 @@ describe("VcmpClient authentication", function() {
 		expect(calls).to.equal(2);
 	});
 
-	it("closes the session when the credential provider fails on a refresh", async () => {
-		server.onAut = () => `ACK{"expiresIn":2000}`;
-		let calls = 0;
-		const errors: VcmpError[] = [];
-		const client = createClient({
-			authenticate: async () => {
-				if (++calls == 2) {
-					throw new Error("no token");
-				}
-				return {token: "t"};
-			},
-			reconnectTimeout: 5000,
-		});
-		client.onAuthenticationError = error => errors.push(error);
-		client.start();
-		await waitFor(() => server.connections[0]?.closed !== undefined, 3000);
-		expect(server.connections[0].closed).to.deep.equal({code: 4008, reason: "authentication failed"});
-		expect(errors.map(error => error.status)).to.deep.equal([500]);
-		expect(server.auts(server.connections[0])).to.have.length(1);
-	});
-
-	it("rejects an answer timeout or refresh retry delay below 1 s at construction", () => {
+	it("rejects an answer timeout below 1 s at construction", () => {
 		const authenticate = async () => ({token: "t"});
 		expect(() => new VcmpClient("ws://test", {authenticate, authenticationTimeout: 999})).to.throw(RangeError);
-		expect(() => new VcmpClient("ws://test", {authenticate, refreshRetryDelay: 500})).to.throw(RangeError);
 		expect(() => new VcmpClient("ws://test", {authenticate, authenticationTimeout: NaN})).to.throw(RangeError);
-		expect(() => new VcmpClient("ws://test", {authenticate, authenticationTimeout: 1000, refreshRetryDelay: 1000}))
-			.to.not.throw();
+		expect(() => new VcmpClient("ws://test", {authenticate, authenticationTimeout: 1000})).to.not.throw();
 	});
 
 	describe("a malformed ACK", () => {
@@ -367,149 +338,292 @@ describe("VcmpClient authentication", function() {
 				expect(client.connected).to.be.true;
 				expect(client.authentication).to.deep.equal(expected);
 				expect(warnings.some(warning => /ACK payload|expiresIn/.test(warning))).to.be.true;
-				// no refresh is scheduled from an invalid expiresIn
-				await sleep(1100);
-				expect(server.auts()).to.have.length(1);
 			});
 		}
 	});
 
-	it("re-authenticates at the lead time before the expiry, without holding messages", async () => {
-		const autTimes: number[] = [];
-		server.onAut = () => {
-			autTimes.push(Date.now());
-			return `ACK{"expiresIn":1500,"n":${autTimes.length}}`;
-		};
-		const acks: VcmpAuthenticationAck[] = [];
-		const client = createClient({authenticate: async () => ({token: "t"}), refreshLeadTime: 100});
-		client.onAuthenticated = ack => acks.push(ack);
-		let opens = 0;
-		client.onOpen = () => opens++;
-		client.start();
-		await waitFor(() => autTimes.length == 2, 3000);
-		// refreshed 1500 - 100 ms after the first ACK (the default lead time would be 300 ms)
-		expect(autTimes[1] - autTimes[0]).to.be.within(1350, 1600);
-		// messages flow while refreshing
-		await client.send({"@type": "foo"});
-		await waitFor(() => acks.length == 3, 3000);
-		expect(acks.map(ack => ack.n)).to.deep.equal([1, 2, 3]);
-		expect(opens).to.equal(1);
-		expect(server.connections).to.have.length(1);
-		expect(client.authentication).to.deep.equal({expiresIn: 1500, n: 3});
-	});
+	describe("reauthenticate()", () => {
+		/** Starts a client against the fake server and waits until its first authentication is acknowledged. */
+		async function startAuthenticated(options: Partial<ConstructorParameters<typeof VcmpClient>[1]> = {}) {
+			const client = createClient({authenticate: async () => ({token: "t"}), ...options});
+			const opened = new Promise<void>(resolve => client.onOpen = () => resolve());
+			client.start();
+			await opened;
+			return client;
+		}
 
-	it("bounds the refresh delay: lead time at most expiresIn / 2, never sooner than 1 s", () => {
-		expect(computeRefreshDelay(300000)).to.equal(240000);
-		expect(computeRefreshDelay(10000, 2000)).to.equal(8000);
-		expect(computeRefreshDelay(10000, expiresIn => expiresIn / 4)).to.equal(7500);
-		// a lead time beyond half the lifetime is clamped
-		expect(computeRefreshDelay(10000, 60000)).to.equal(5000);
-		expect(computeRefreshDelay(10000, () => 60000)).to.equal(5000);
-		// an invalid lead time falls back to the default
-		expect(computeRefreshDelay(10000, () => NaN)).to.equal(8000);
-		expect(computeRefreshDelay(10000, -5)).to.equal(8000);
-		expect(computeRefreshDelay(10000, () => {
-			throw new Error("boom");
-		})).to.equal(8000);
-		// never sooner than 1 s after the ACK
-		expect(computeRefreshDelay(500, 0)).to.equal(1000);
-		expect(computeRefreshDelay(0)).to.equal(1000);
-		expect(computeRefreshDelay(1000)).to.equal(1000);
-	});
-
-	it("defaults the lead time to min(60 s, 20 % of expiresIn)", () => {
-		expect(defaultRefreshLeadTime(1000)).to.equal(200);
-		expect(defaultRefreshLeadTime(300000)).to.equal(60000);
-		expect(defaultRefreshLeadTime(3600000)).to.equal(60000);
-	});
-
-	it("keeps the session when the refreshLeadTime function throws", async () => {
-		server.onAut = () => `ACK{"expiresIn":60000}`;
-		const client = createClient({
-			authenticate: async () => ({token: "t"}),
-			refreshLeadTime: () => {
-				throw new Error("boom");
-			},
+		it("sends one AUT with a fresh credential and resolves with the ACK payload", async () => {
+			server.onAut = credential => `ACK{"expiresIn":60000,"token":"${credential.token}"}`;
+			let calls = 0;
+			const acks: VcmpAuthenticationAck[] = [];
+			const client = await startAuthenticated({authenticate: async () => ({token: `t${++calls}`})});
+			client.onAuthenticated = ack => acks.push(ack);
+			let opens = 0;
+			client.onOpen = () => opens++;
+			const ack = await client.reauthenticate();
+			expect(ack).to.deep.equal({expiresIn: 60000, token: "t2"});
+			expect(acks).to.deep.equal([{expiresIn: 60000, token: "t2"}]);
+			expect(client.authentication).to.deep.equal({expiresIn: 60000, token: "t2"});
+			expect(server.auts().map(frame => JSON.parse(frame.slice(15)).token)).to.deep.equal(["t1", "t2"]);
+			expect(opens).to.equal(0);
+			expect(server.connections).to.have.length(1);
 		});
-		const opened = new Promise<void>(resolve => client.onOpen = () => resolve());
-		client.start();
-		await opened;
-		expect(client.connected).to.be.true;
-		await client.send({"@type": "foo"});
-		expect(server.msgs()).to.have.length(1);
-	});
 
-	it("doesn't refresh without expiresIn", async () => {
-		server.onAut = () => "ACK";
-		createClient({authenticate: async () => ({token: "t"})}).start();
-		await waitFor(() => server.auts().length == 1);
-		await sleep(100);
-		expect(server.auts()).to.have.length(1);
-	});
-
-	it("retries a refresh answered with NAK 401 until the expiry", async () => {
-		server.onAut = (credential, connection) =>
-			server.auts(connection).length == 1 ? `ACK{"expiresIn":3500}` : `NAK{"title":"Invalid","status":401}`;
-		const errors: number[] = [];
-		const client = createClient({
-			authenticate: async () => ({token: "t"}),
-			refreshLeadTime: 1500,
-			refreshRetryDelay: 1000,
+		it("doesn't hold messages while the re-authentication is pending", async () => {
+			let answer: (() => void) | undefined;
+			server.onAut = (credential, connection, id) => {
+				if (server.auts(connection).length == 1) {
+					return "ACK";
+				}
+				answer = () => connection.webSocket.send(`ACK${id}`);
+				return undefined;
+			};
+			const client = await startAuthenticated();
+			const reauthenticated = client.reauthenticate();
+			await waitFor(() => answer !== undefined);
+			await client.send({"@type": "foo"});
+			answer!();
+			await reauthenticated;
 		});
-		client.onAuthenticationError = error => errors.push(error.status);
-		client.start();
-		await sleep(3800);
-		// refresh at 2000 ms, retried at 3000 ms; not at 4000 ms, past the expiry at 3500 ms
-		const auts = server.auts().length;
-		expect(auts).to.equal(3);
-		expect(errors.every(status => status == 401)).to.be.true;
-		expect(errors).to.have.length(auts - 1);
-		// the session stays open (the server would close it at the expiry)
-		expect(client.connected).to.be.true;
-	});
 
-	it("retries a refresh answered with NAK 403 until the expiry", async () => {
-		// a 403 without a principal change: the server keeps the session until its old expiry
-		server.onAut = (credential, connection) =>
-			server.auts(connection).length == 1 ? `ACK{"expiresIn":3500}` : `NAK{"title":"Forbidden","status":403}`;
-		const errors: number[] = [];
-		const client = createClient({
-			authenticate: async () => ({token: "t"}),
-			refreshLeadTime: 1500,
-			refreshRetryDelay: 1000,
+		it("never re-authenticates on its own, whatever the expiresIn", async () => {
+			server.onAut = () => `ACK{"expiresIn":1000}`;
+			await startAuthenticated();
+			await sleep(1500);
+			expect(server.auts()).to.have.length(1);
 		});
-		client.onAuthenticationError = error => errors.push(error.status);
-		client.start();
-		await sleep(3800);
-		expect(server.auts().length).to.equal(3);
-		expect(errors.every(status => status == 403)).to.be.true;
-		expect(server.connections).to.have.length(1);
-	});
 
-	it("closes and reconnects instead of retrying when a refresh gets no answer", async () => {
-		server.onAut = (credential, connection) =>
-			server.auts(connection).length == 1 ? `ACK{"expiresIn":2000}` : undefined;
-		const errors: number[] = [];
-		let calls = 0;
-		const client = createClient({
-			authenticate: async () => ({token: `t${++calls}`}),
-			authenticationTimeout: 1000,
-			refreshLeadTime: 1900,
+		for (const status of [401, 403, 503]) {
+			it(`rejects on a NAK ${status}, reports it, keeps the session and doesn't retry`, async () => {
+				server.onAut = (credential, connection) =>
+					server.auts(connection).length == 1 ? "ACK" : `NAK{"title":"No","status":${status}}`;
+				const client = await startAuthenticated();
+				const errors: number[] = [];
+				client.onAuthenticationError = error => errors.push(error.status);
+				const error = await client.reauthenticate().then(() => undefined, error => error);
+				expect(error).to.be.instanceOf(VcmpError);
+				expect(error.status).to.equal(status);
+				expect(errors).to.deep.equal([status]);
+				await sleep(200);
+				expect(server.auts()).to.have.length(2);
+				expect(server.connections[0].closed).to.be.undefined;
+				expect(client.connected).to.be.true;
+				await client.send({"@type": "foo"});
+			});
+		}
+
+		it("rejects when the credential provider fails, sends nothing and keeps the session", async () => {
+			let calls = 0;
+			const client = await startAuthenticated({
+				authenticate: () => {
+					if (++calls == 2) {
+						throw new Error("no token");
+					}
+					return {token: "t"};
+				},
+			});
+			const errors: number[] = [];
+			client.onAuthenticationError = error => errors.push(error.status);
+			const error = await client.reauthenticate().then(() => undefined, error => error);
+			expect(error.status).to.equal(500);
+			expect(errors).to.deep.equal([500]);
+			expect(server.auts()).to.have.length(1);
+			expect(client.connected).to.be.true;
+			await sleep(50);
+			expect(server.connections[0].closed).to.be.undefined;
 		});
-		client.onAuthenticationError = error => errors.push(error.status);
-		let closes = 0;
-		client.onClose = () => closes++;
-		client.start();
-		await waitFor(() => server.connections.length == 2 && server.auts(server.connections[1]).length == 1, 5000);
-		const first = server.connections[0];
-		await waitFor(() => first.closed !== undefined);
-		// the refresh was sent once, never retried on the session that may still be processing it
-		expect(server.auts(first)).to.have.length(2);
-		expect(first.closed).to.deep.equal({code: 4008, reason: "authentication timeout"});
-		expect(errors).to.deep.equal([504]);
-		expect(closes).to.equal(1);
-		// reconnected with a fresh credential
-		expect(JSON.parse(server.auts(server.connections[1])[0].slice(15))).to.deep.equal({token: "t3"});
+
+		it("rejects when the credential provider doesn't complete in time, sends nothing and keeps the session", async () => {
+			let calls = 0;
+			let late: ((credential: object) => void) | undefined;
+			const client = await startAuthenticated({
+				authenticate: () => ++calls == 1 ? {token: "t"} : new Promise<object>(resolve => late = resolve),
+				authenticationTimeout: 1000,
+			});
+			const start = Date.now();
+			const error = await client.reauthenticate().then(() => undefined, error => error);
+			expect(Date.now() - start).to.be.within(950, 1500);
+			expect(error.status).to.equal(504);
+			// the provider completing late sends nothing
+			late!({token: "late"});
+			await sleep(50);
+			expect(server.auts()).to.have.length(1);
+			expect(server.connections[0].closed).to.be.undefined;
+			expect(client.connected).to.be.true;
+		});
+
+		it("closes with 4008 and reconnects when a sent AUT gets no answer", async () => {
+			server.onAut = (credential, connection) =>
+				server.connections.indexOf(connection) == 0 && server.auts(connection).length == 2 ? undefined : "ACK";
+			const client = await startAuthenticated({authenticationTimeout: 1000});
+			const errors: number[] = [];
+			client.onAuthenticationError = error => errors.push(error.status);
+			const reopened = new Promise<void>(resolve => client.onOpen = () => resolve());
+			const error = await client.reauthenticate().then(() => undefined, error => error);
+			expect(error.status).to.equal(504);
+			expect(errors).to.deep.equal([504]);
+			await reopened;
+			expect(server.connections[0].closed).to.deep.equal({code: 4008, reason: "authentication timeout"});
+			expect(server.auts(server.connections[0])).to.have.length(2);
+		});
+
+		it("coalesces calls while a re-authentication is pending into one further AUT with a fresh credential", async () => {
+			const answers: Array<() => void> = [];
+			server.onAut = (credential, connection, id) => {
+				if (server.auts(connection).length == 1) {
+					return "ACK";
+				}
+				answers.push(() => connection.webSocket.send(`ACK{"n":${answers.length}}`.replace("ACK", `ACK${id}`)));
+				return undefined;
+			};
+			let calls = 0;
+			const client = await startAuthenticated({authenticate: async () => ({token: `t${++calls}`})});
+			const first = client.reauthenticate();
+			await waitFor(() => answers.length == 1);
+			const second = client.reauthenticate();
+			const third = client.reauthenticate();
+			await sleep(50);
+			// only one AUT in flight
+			expect(server.auts()).to.have.length(2);
+			answers[0]();
+			expect(await first).to.deep.equal({n: 1});
+			await waitFor(() => answers.length == 2);
+			expect(server.auts()).to.have.length(3);
+			expect(JSON.parse(server.auts()[2].slice(15))).to.deep.equal({token: "t3"});
+			answers[1]();
+			expect(await second).to.deep.equal({n: 2});
+			expect(await third).to.deep.equal({n: 2});
+			await sleep(50);
+			expect(server.auts()).to.have.length(3);
+		});
+
+		it("serves a call made while the first AUT is pending with one further AUT after its ACK", async () => {
+			let release: (() => void) | undefined;
+			server.onAut = (credential, connection, id) => {
+				if (server.auts(connection).length == 1) {
+					release = () => connection.webSocket.send(`ACK${id}`);
+					return undefined;
+				}
+				return `ACK{"second":true}`;
+			};
+			const client = createClient({authenticate: async () => ({token: "t"})});
+			client.start();
+			await waitFor(() => release !== undefined);
+			const reauthenticated = client.reauthenticate();
+			await sleep(30);
+			expect(server.auts()).to.have.length(1);
+			release!();
+			expect(await reauthenticated).to.deep.equal({second: true});
+			expect(server.auts()).to.have.length(2);
+		});
+
+		it("resolves without sending when the first AUT it waited for fails", async () => {
+			let reject: (() => void) | undefined;
+			server.onAut = (credential, connection, id) => {
+				reject = () => connection.webSocket.send(`NAK${id}{"title":"No","status":401}`);
+				return undefined;
+			};
+			const client = createClient({authenticate: async () => ({token: "t"}), reconnectTimeout: 5000});
+			client.onAuthenticationError = () => {};
+			client.start();
+			await waitFor(() => reject !== undefined);
+			const reauthenticated = client.reauthenticate();
+			reject!();
+			expect(await reauthenticated).to.be.undefined;
+			await sleep(50);
+			expect(server.auts()).to.have.length(1);
+		});
+
+		it("resolves without sending when there is no authenticated session", async () => {
+			const client = createClient({authenticate: async () => ({token: "t"})});
+			// not started
+			expect(await client.reauthenticate()).to.be.undefined;
+			// connecting
+			server.onAut = () => "ACK";
+			const opened = new Promise<void>(resolve => client.onOpen = () => resolve());
+			client.start();
+			expect(await client.reauthenticate()).to.be.undefined;
+			await opened;
+			expect(server.auts()).to.have.length(1);
+			// stopped
+			client.stop();
+			expect(await client.reauthenticate()).to.be.undefined;
+			// without the authenticate option
+			const plain = new VcmpClient(server.url, {customWebSocket: WebSocket});
+			expect(await plain.reauthenticate()).to.be.undefined;
+		});
+
+		it("resolves without sending on an open session that hasn't authenticated", async () => {
+			// a session on an already open socket: no first AUT was started
+			const sent: string[] = [];
+			const session = new VcmpSession({
+				webSocket: {readyState: 1, send: (data: string) => sent.push(data), close() {}} as any,
+				resolver: () => undefined,
+				clientAuthentication: {authenticate: () => ({token: "t"}), timeout: 1000},
+			});
+			expect(await session.reauthenticate()).to.be.undefined;
+			await sleep(20);
+			expect(sent).to.deep.equal([]);
+		});
+
+		it("gives coalesced calls the outcome of the AUT a handler started meanwhile", async () => {
+			// an application whose error handler retries at once: its call starts the further AUT before the
+			// coalesced calls are served, which then must get that AUT's outcome, not `undefined`
+			const sent: string[] = [];
+			const webSocket: any = {
+				readyState: 1,
+				send: (data: string) => sent.push(data),
+				close() {},
+			};
+			let calls = 0;
+			const session = new VcmpSession({
+				webSocket,
+				resolver: () => undefined,
+				clientAuthentication: {authenticate: () => ({token: `t${++calls}`}), timeout: 5000},
+			});
+			const auts = () => sent.filter(frame => frame.startsWith("AUT"));
+			const answer = (index: number, frame: string) =>
+				webSocket.onmessage({data: frame.replace("#", auts()[index].slice(3, 15))});
+			webSocket.onopen();
+			await waitFor(() => auts().length == 1);
+			answer(0, "ACK#");
+
+			let retry: Promise<unknown> | undefined;
+			session.onAuthenticationError = () => {
+				retry ??= session.reauthenticate();
+			};
+			const a = session.reauthenticate().then(() => undefined, error => error);
+			await waitFor(() => auts().length == 2);
+			const b = session.reauthenticate();
+			answer(1, `NAK#{"title":"Invalid","status":401}`);
+			await waitFor(() => auts().length == 3);
+			expect(JSON.parse(auts()[2].slice(15))).to.deep.equal({token: "t3"});
+			answer(2, `ACK#{"n":3}`);
+			expect((await a).status).to.equal(401);
+			expect(await b).to.deep.equal({n: 3});
+			expect(await retry).to.deep.equal({n: 3});
+			await sleep(20);
+			expect(auts()).to.have.length(3);
+		});
+
+		it("rejects and reports when the session closes while the re-authentication is pending", async () => {
+			server.onAut = (credential, connection) => server.auts(connection).length == 1 ? "ACK" : undefined;
+			const client = await startAuthenticated({reconnectTimeout: 5000});
+			const events: string[] = [];
+			const errors: VcmpError[] = [];
+			client.onAuthenticationError = error => {
+				errors.push(error);
+				events.push(`error:${error.status}`);
+			};
+			client.onClose = () => events.push("close");
+			const reauthenticated = client.reauthenticate().then(() => undefined, error => error);
+			await waitFor(() => server.auts().length == 2);
+			server.connections[0].webSocket.close();
+			const error = await reauthenticated;
+			expect(error.status).to.equal(503);
+			expect(errors).to.deep.equal([error]);
+			expect(events).to.deep.equal(["error:503", "close"]);
+		});
 	});
 
 	for (

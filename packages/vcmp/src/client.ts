@@ -1,7 +1,6 @@
 import {
 	DEFAULT_AUTHENTICATION_TIMEOUT,
-	DEFAULT_REFRESH_RETRY_DELAY,
-	validateClientAuthentication,
+	validateAuthenticationTimeout,
 	VcmpAuthenticatedEvent,
 	VcmpAuthenticationAck,
 } from "./authentication";
@@ -29,8 +28,8 @@ export interface Options {
 	debug?: ConsoleLike;
 	/**
 	 * Authenticates every session with an `AUT` frame (VCMP session authentication): called on every
-	 * (re)connect and before the authentication expires, it provides the credential, a JSON object whose
-	 * shape the endpoint defines (e.g. `{token: "…"}`). With it set, `onOpen` is raised and `connected`
+	 * (re)connect and on every `reauthenticate()`, it provides the credential, a JSON object whose shape the
+	 * endpoint defines (e.g. `{token: "…"}`). With it set, `onOpen` is raised and `connected`
 	 * becomes `true` only once the server acknowledged the authentication; messages sent before are held
 	 * back until then. Failures are reported via `onAuthenticationError`.
 	 */
@@ -41,20 +40,6 @@ export interface Options {
 	 * closed and reconnected. At least 1000 (smaller values are rejected). Default: 10000.
 	 */
 	authenticationTimeout: number;
-	/**
-	 * How long before the authentication expires (the `ACK`'s `expiresIn`) the client re-authenticates,
-	 * in milliseconds: fixed, or computed from `expiresIn`. Default: `min(60 s, 20 % of expiresIn)`. The
-	 * effective lead time is at most `expiresIn / 2`, and a refresh is never sent sooner than 1 s after the
-	 * `ACK` (see `computeRefreshDelay`).
-	 */
-	refreshLeadTime?: number | ((expiresIn: number) => number);
-	/**
-	 * Delay in milliseconds before a re-authentication answered with `NAK` is retried; retries stop at the
-	 * expiry, when the server closes the session. A re-authentication without an answer within
-	 * `authenticationTimeout`, or whose credential provider fails, is not retried: the session is closed (4008)
-	 * and reconnected. At least 1000 (smaller values are rejected). Default: 5000.
-	 */
-	refreshRetryDelay: number;
 }
 
 const defaultOptions: Options = {
@@ -62,7 +47,6 @@ const defaultOptions: Options = {
 	autoStart: false,
 	initialHeartbeatTimeout: 60000,
 	authenticationTimeout: DEFAULT_AUTHENTICATION_TIMEOUT,
-	refreshRetryDelay: DEFAULT_REFRESH_RETRY_DELAY,
 };
 
 export class VcmpClient {
@@ -81,14 +65,17 @@ export class VcmpClient {
 	public onOpen?: OpenHandler;
 	public onClose?: CloseHandler;
 	/**
-	 * Raised on every `ACK` to an `AUT` (first and refreshes) with its payload: `expiresIn` and the
-	 * endpoint's own members. For the first one, it is raised before `onOpen`.
+	 * Raised on every `ACK` to an `AUT` (first and re-authentications) with its payload: `expiresIn` and the
+	 * endpoint's own members. For the first one, it is raised before `onOpen`. The client sets no timer from
+	 * `expiresIn`: re-authenticating before it is the application's call (`reauthenticate()`).
 	 */
 	public onAuthenticated?: (ack: VcmpAuthenticationAck) => void;
 	/**
-	 * Raised when an authentication fails: a `NAK` (the server's problem detail: 400, 401 or 403), no
-	 * answer within `authenticationTimeout` (status 504), or a failing credential provider (status 500).
-	 * A failed first authentication closes the session, which reconnects after `reconnectTimeout`.
+	 * Raised when an authentication fails: a `NAK` (the server's problem detail), no answer within
+	 * `authenticationTimeout` (status 504), a failing credential provider (status 500), or the session closing
+	 * while an `AUT` is pending (status 503, raised before `onClose`; not after `stop()`). A failed first
+	 * authentication closes the session, which reconnects after `reconnectTimeout`; for a re-authentication see
+	 * `reauthenticate()`.
 	 */
 	public onAuthenticationError?: (error: VcmpError) => void;
 
@@ -101,10 +88,7 @@ export class VcmpClient {
 		};
 
 		if (this.options.authenticate) {
-			validateClientAuthentication({
-				timeout: this.options.authenticationTimeout,
-				refreshRetryDelay: this.options.refreshRetryDelay,
-			});
+			validateAuthenticationTimeout(this.options.authenticationTimeout);
 		}
 
 		this.debug(`Constructed VcmpClient for URL ${this.url} and the following options`, this.options);
@@ -169,6 +153,35 @@ export class VcmpClient {
 		return session?.isOpen && (!this.options.authenticate || session.isAuthenticated);
 	}
 
+	/**
+	 * Re-authenticates the current session: asks `authenticate` for a fresh credential and sends one `AUT`. Call
+	 * it when the application's credential was refreshed (e.g. from keycloak-js `onAuthRefreshSuccess`); the
+	 * client schedules no re-authentication itself, and a session whose authentication expires is closed by the
+	 * server and reconnected.
+	 *
+	 * Resolves with the `ACK` payload (incl. `expiresIn`), or rejects with the authentication error, which is
+	 * also raised via `onAuthenticationError` — attach a rejection handler:
+	 * - `NAK` (any status): the session stays, no retry (call again if wanted).
+	 * - The credential provider fails or doesn't complete within `authenticationTimeout`: nothing is sent, the
+	 *   session stays.
+	 * - A sent `AUT` without an answer within `authenticationTimeout`: rejects (504), the session is closed
+	 *   (4008) and reconnected.
+	 * - The `AUT` can't be handed to the socket: rejects (503), the session is closed (4008, `authentication
+	 *   failed`) and reconnected.
+	 * - The session closes while the `AUT` is pending: rejects (503), also reported via `onAuthenticationError`
+	 *   except after `stop()`.
+	 *
+	 * Calls while an `AUT` is pending (the first one or a re-authentication) are served by a single further
+	 * `AUT` after its answer. Without an authenticated session (no `authenticate` option, connecting,
+	 * disconnected, or a first `AUT` that failed), nothing is sent and it resolves with `undefined`.
+	 */
+	reauthenticate(): Promise<VcmpAuthenticationAck | undefined> {
+		if (!this.options.authenticate || !this.session) {
+			return Promise.resolve(undefined);
+		}
+		return this.session.reauthenticate();
+	}
+
 	/** The payload of the current session's last `ACK` to an `AUT`, if it authenticated. */
 	get authentication() {
 		return this.session?.authentication;
@@ -203,13 +216,13 @@ export class VcmpClient {
 			this.debug("Constructing websocket");
 			const webSocket = new webSocketConstructor(this.url);
 			this.debug("Connecting handlers");
-			const {authenticate, authenticationTimeout, refreshLeadTime, refreshRetryDelay} = this.options;
+			const {authenticate, authenticationTimeout} = this.options;
 			const session = new VcmpSession({
 				webSocket,
 				resolver: type => this.handler.get(type),
 				debug: this.options.debug,
 				clientAuthentication: authenticate
-					? {authenticate, timeout: authenticationTimeout, refreshLeadTime, refreshRetryDelay}
+					? {authenticate, timeout: authenticationTimeout}
 					: undefined,
 			});
 			this.session = session;

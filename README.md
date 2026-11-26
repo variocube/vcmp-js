@@ -151,37 +151,58 @@ implemented wire-compatibly by vcmp-spring, vcmp-js and vcmp-rs).
 ```typescript
 const client = new VcmpClient("wss://example.com/vcmp", {
 	autoStart: true,
-	authenticate: async () => ({token: await fetchToken()}),
+	authenticate: async () => ({token: keycloak.token}),
 });
 client.onOpen = () => console.log("Authenticated, ready to send");
 client.onAuthenticated = ack => console.log("Authenticated as", ack.user, "expires in", ack.expiresIn);
 client.onAuthenticationError = error => console.warn("Authentication failed", error.status, error.title);
+
+// the application re-authenticates whenever its token was refreshed
+keycloak.onAuthRefreshSuccess = () => {
+	client.reauthenticate().catch(() => {/* already reported via onAuthenticationError */});
+};
 ```
 
-- `authenticate` is called on **every** (re)connect, so it can return a fresh credential. The client sends
-  `AUT` first and holds back every message sent meanwhile until the `ACK`. `onOpen` is raised, and
-  `connected` becomes `true`, only after the `ACK`; `client.authentication` holds its payload.
-- A `NAK`, no answer within `authenticationTimeout` (default 10 s; e.g. an older server that doesn't know
-  `AUT`) or a failing credential provider is reported to `onAuthenticationError` (the `NAK`'s problem
-  detail; 504 for the timeout; 500 for the provider). The client then closes the session with 4008 —
-  reason `authentication failed` after a `NAK` or a failed provider, `authentication timeout` without an
-  answer — and reconnects after `reconnectTimeout` with a fresh credential. Held messages are rejected
-  (503). The answer timeout starts when the credential is requested, so a provider that never completes
-  ends like an unanswered `AUT`.
-- When the `ACK` carries `expiresIn`, the client re-authenticates `refreshLeadTime` before the expiry
-  (default `min(60 s, 20 % of expiresIn)`; a number or a function of `expiresIn`), counted from receiving
-  the `ACK`, so clock skew between client and server doesn't matter. The lead time is at most half of
-  `expiresIn`, and a refresh is never sent sooner than 1 s after the `ACK`, so no setting can cause a
-  refresh loop. A refresh answered with a `NAK` is reported and retried every `refreshRetryDelay`
-  (default 5 s) until the expiry, after which the server closes the session and the client reconnects as
-  usual. A refresh without an answer within `authenticationTimeout` (the server may still be processing
-  it, and a second `AUT` would close the session as concurrent) or with a failing credential provider is
-  reported and not retried on that session: the client closes it (4008) and reconnects with a fresh
-  credential.
-- `authenticationTimeout` and `refreshRetryDelay` must be at least 1 s; smaller values throw a
-  `RangeError` when the client is constructed.
+- `authenticate` is called on **every** (re)connect and on every `reauthenticate()`, so it can return a
+  fresh credential. The client sends `AUT` first and holds back every message sent meanwhile until the
+  `ACK`. `onOpen` is raised, and `connected` becomes `true`, only after the `ACK`; `client.authentication`
+  holds its payload.
+- A `NAK`, no answer within `authenticationTimeout` (default 10 s, at least 1 s — a smaller value throws a
+  `RangeError` at construction; e.g. an older server that doesn't know `AUT`) or a failing credential
+  provider is reported to `onAuthenticationError` (the `NAK`'s problem detail; 504 for the timeout; 500 for
+  the provider). The client then closes the session with 4008 — reason `authentication failed` after a
+  `NAK` or a failed provider, `authentication timeout` without an answer — and reconnects after
+  `reconnectTimeout` with a fresh credential. Held messages are rejected (503). The answer timeout starts
+  when the credential is requested, so a provider that never completes ends like an unanswered `AUT`.
+- If the session closes while an `AUT` is pending (e.g. an older server that closes on the unknown frame),
+  `onAuthenticationError` is raised with 503 "Session closed" before `onClose`, and the client reconnects
+  as after any close. Not after `client.stop()`: a deliberate stop reports nothing (a pending
+  `reauthenticate()` still rejects with 503).
+- **The application triggers re-authentication; the client schedules nothing.** `onAuthenticated` passes
+  each `ACK` payload, including `expiresIn`, but the client sets no timer from it. An application with an
+  expiring credential (keycloak-js, oidc-client, …) calls `reauthenticate()` whenever its token was
+  refreshed. One that never does loses the session at the expiry (the server closes it), and the client
+  reconnects with a fresh credential, as after any close.
+- `reauthenticate(): Promise<VcmpAuthenticationAck | undefined>` asks `authenticate` and sends one `AUT` on
+  the open session. It resolves with the `ACK` payload, or rejects with the authentication error, which is
+  also reported via `onAuthenticationError` (attach a rejection handler):
+  - `NAK` (any status): the session stays (the server keeps it until its current expiry); no automatic
+    retry — call again if wanted. On a principal change (403) the server closes the session.
+  - The provider fails or doesn't complete within `authenticationTimeout`: nothing is sent, the session
+    stays (its current authentication is still valid).
+  - A sent `AUT` without an answer within `authenticationTimeout`: rejects (504), the client closes the
+    session (4008, `authentication timeout`) and reconnects; a second `AUT` while the first is pending would
+    make the server close it anyway. If the session closes while the `AUT` is pending, it rejects (503, also reported — not after `stop()`, where only the promise rejects);
+    if the `AUT` can't be handed to the socket, it rejects (503) and the client closes the session (4008,
+    `authentication failed`) and reconnects.
+  - Only one `AUT` is in flight: calls while one is pending (the first `AUT` or a re-authentication) are
+    served together by a single further `AUT` after the pending answer, with a fresh credential (or by the
+    one an `onAuthenticated`/`onAuthenticationError`/`onOpen` handler started meanwhile).
+  - Without an authenticated session (no `authenticate` option, connecting, disconnected, or a first `AUT`
+    that fails while the call waits), nothing is sent and it resolves with `undefined`: the next connect
+    asks the provider anyway.
 - A malformed `ACK` is tolerated with a warning: a payload that isn't a JSON object counts as no payload,
-  an `expiresIn` that isn't a non-negative integer as absent (no refresh; the server decides about expiry).
+  an `expiresIn` that isn't a non-negative integer as absent (the server decides about expiry).
 
 Without `authenticate`, the client behaves exactly as before.
 
